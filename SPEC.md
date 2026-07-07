@@ -47,12 +47,18 @@ and lets logs be re-decoded later against different catalogs.
 
 ### Output sinks
 
-The consumer writes each formatted log line to one of:
+The consumer writes each formatted log line to one of (`--sink console|logcat|both`):
 
-- **logcat** (default) — appears alongside normal logs. On automotive targets the
-  OEM already pipes logcat into DLT, so **no logcat→DLT bridge is ours to build**.
-- **console** (stdout) — for local/interactive use.
-- **local file** — for offline capture and later decoding.
+- **logcat** — appears alongside normal logs under tag **`bindfetto`**, and each
+  message is prefixed with the **`BF1`** marker. Either is enough for the decoder to
+  select bindfetto's lines: filter by tag (`logcat -s bindfetto`), or match `BF1` in
+  a merged/DLT log where the tag may be flattened. On automotive targets the OEM
+  already pipes logcat into DLT, so **no logcat→DLT bridge is ours to build**.
+- **console** (stdout) — for local/interactive use; adds a wall-clock timestamp.
+- **local file** — for offline capture and later decoding *(planned)*.
+
+The `BF1` marker is versioned so the line format can evolve without breaking older
+decoders.
 
 ### Process name resolution
 

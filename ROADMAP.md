@@ -19,9 +19,12 @@ Vertical slices; each one runs on the AVD before the next starts.
   Verified live on the AVD (automotive AIDL + a HIDL bluetooth call).
 - **M4 — in-kernel filter.** Hash descriptor bytes in the probe; match against a
   BPF map of wanted hashes to drop before the ring buffer.
-- **M5 — errors + sinks + CLI.** Second attach point for
-  `BR_FAILED_REPLY`/`BR_DEAD_REPLY` (toggleable); logcat/console/file + JSONL
-  sinks; CLI args (start/stop, sink, filter, error toggle).
+- **M5 — errors + sinks + CLI.** In progress.
+  - ✅ Console sink with wall-clock timestamp.
+  - ✅ Logcat sink (`--sink console|logcat|both`), tag `bindfetto` + `BF1` marker.
+  - ⏳ File / JSONL sink.
+  - ⏳ Second attach point for `BR_FAILED_REPLY`/`BR_DEAD_REPLY` (toggleable).
+  - ⏳ Full CLI (interface filter, `--include-replies`, error toggle).
 
 ## Track B — offline decode
 
