@@ -106,8 +106,16 @@ fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
     let src_pid = (pid_tgid >> 32) as u32;
     let src_tid = pid_tgid as u32;
 
-    let dst_pid = unsafe { ctx.read_at::<i32>(OFF_TO_PROC) }? as u32;
     let reply = unsafe { ctx.read_at::<i32>(OFF_REPLY) }? as u32;
+    // Normal (successful) replies are noise — a code:0 ack per call. Drop them here,
+    // before the ring buffer, still clearing the per-thread stash. Error replies come
+    // from a separate attach point (M5). An --include-replies flag can re-enable them.
+    if reply != 0 {
+        let _ = STASH.remove(&pid_tgid);
+        return Ok(());
+    }
+
+    let dst_pid = unsafe { ctx.read_at::<i32>(OFF_TO_PROC) }? as u32;
     let code = unsafe { ctx.read_at::<u32>(OFF_CODE) }?;
     let flags = unsafe { ctx.read_at::<u32>(OFF_FLAGS) }?;
 
