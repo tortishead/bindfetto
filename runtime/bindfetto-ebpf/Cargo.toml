@@ -1,8 +1,8 @@
 [package]
 name = "bindfetto-ebpf"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
 
 # Built for bpfel-unknown-none via the consumer's build.rs (aya-build); not a
 # member of the root workspace. Uses its own [workspace] table so it resolves
