@@ -1,0 +1,19 @@
+# Cross-compile the userspace consumer to aarch64-linux-android using the Android
+# NDK's clang as the linker.
+#
+# Setup (one time):
+#   1. Install the Android NDK — via Android Studio's SDK Manager, or:
+#        sdkmanager "ndk;27.0.12077973"
+#   2. Put the NDK toolchain bin dir on PATH so the linker wrapper resolves:
+#        export ANDROID_NDK_HOME="$HOME/Library/Android/sdk/ndk/27.0.12077973"
+#        export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin:$PATH"
+#      (On Apple silicon the prebuilt dir is still named `darwin-x86_64`.)
+#
+# API level 30 (Android 11) matches the GKI/BTF-era dev target; change the number
+# in the wrapper name to link against a different minSdk.
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android30-clang"
+
+# Prefer not to edit PATH? Comment out the line above and hardcode the absolute
+# path to the wrapper instead, e.g.:
+# linker = "/Users/you/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android30-clang"
