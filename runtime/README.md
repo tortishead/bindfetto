@@ -3,14 +3,12 @@
 The on-device half of bindfetto: an [`aya`](https://aya-rs.dev) eBPF probe that
 captures Binder transactions and a Rust userspace consumer that drains them.
 
-> **Build status.** The **eBPF probe** (`bindfetto-ebpf`) and **`bindfetto-common`**
-> compile cleanly for `bpfel-unknown-none` against aya-ebpf 0.1.1 / aya 0.13.1 —
-> verified. The **userspace consumer** (`bindfetto`) has *not* been built here: `aya`
-> is Linux-only (won't compile on the macOS host) and cross-building to
-> `aarch64-linux-android` needs the Android NDK linker. Its `build.rs` /
-> ring-buffer API calls are intended shape — reconcile on first Android build. If
-> the aya-build glue fights you, regenerate boilerplate with
-> `cargo generate aya-template` and drop these `src/` files + `bindfetto-common` in.
+> **Build status.** The whole runtime compiles: the **eBPF probe** for
+> `bpfel-unknown-none` and the **userspace consumer** for `aarch64-linux-android`
+> (with the eBPF object embedded via `aya-build`), against aya 0.13.1 / aya-ebpf
+> 0.1.1 with NDK r30. It has **not been run on a device yet** — the tracepoint field
+> offsets in the probe are still placeholders (see below). `aya` is Linux-only, so
+> the consumer only builds for the Android target, not the macOS host.
 
 ## Layout
 

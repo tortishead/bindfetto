@@ -4,11 +4,8 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
-# Built for bpfel-unknown-none via the consumer's build.rs (aya-build); not a
-# member of the root workspace. Uses its own [workspace] table so it resolves
-# independently of the host workspace.
-[workspace]
-
+# Built for bpfel-unknown-none via the consumer's build.rs (aya-build). A member
+# of the runtime workspace (but not a default member) so `--package` resolves.
 [dependencies]
 aya-ebpf = "0.1"
 aya-log-ebpf = "0.1"
@@ -17,10 +14,3 @@ bindfetto-common = { path = "../bindfetto-common" }
 [[bin]]
 name = "bindfetto"
 path = "src/main.rs"
-
-[profile.release]
-# eBPF must be optimized and keep debug info stripped appropriately for the verifier.
-opt-level = 2
-debug = false
-lto = true
-panic = "abort"

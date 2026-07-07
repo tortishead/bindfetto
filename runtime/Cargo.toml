@@ -1,13 +1,13 @@
 # Cargo workspace for the on-device runtime: eBPF probe + userspace consumer.
 #
-# NOTE: the eBPF crate (bindfetto-ebpf) is compiled for the `bpfel-unknown-none`
-# target by the consumer's build.rs via `aya-build`, not as a normal workspace
-# member build. It is listed under `exclude` so `cargo build` at the workspace
-# root only builds host/Android userspace crates.
+# bindfetto-ebpf is a member (so the consumer's build.rs can `cargo build
+# --package bindfetto-ebpf` for the bpf target via aya-build) but NOT a default
+# member, so a plain `cargo build` only builds the userspace crates for the host/
+# Android target — the eBPF crate is compiled separately for bpfel-unknown-none.
 [workspace]
 resolver = "2"
-members = ["bindfetto", "bindfetto-common"]
-exclude = ["bindfetto-ebpf"]
+members = ["bindfetto", "bindfetto-common", "bindfetto-ebpf"]
+default-members = ["bindfetto", "bindfetto-common"]
 
 [workspace.package]
 version = "0.1.0"

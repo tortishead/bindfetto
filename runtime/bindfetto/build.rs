@@ -1,19 +1,18 @@
-//! Build the eBPF crate for the bpf target and make its object available to the
-//! consumer at compile time. See `aya-build` docs for the exact current API — this
-//! is the standard aya-template build glue and is UNVERIFIED here (no toolchain).
+//! Build the eBPF crate for the bpf target (via aya-build) and copy its object
+//! into OUT_DIR, where the consumer embeds it with `include_bytes_aligned!`.
 
-use anyhow::Context as _;
+use aya_build::{Package, Toolchain};
 
-fn main() -> anyhow::Result<()> {
-    let ebpf_pkg = aya_build::cargo_metadata::MetadataCommand::new()
-        .no_deps()
-        .exec()
-        .context("cargo metadata")?
-        .packages
-        .into_iter()
-        .find(|p| p.name == "bindfetto-ebpf")
-        .context("bindfetto-ebpf package not found")?;
-
-    aya_build::build_ebpf([ebpf_pkg])?;
-    Ok(())
+fn main() {
+    aya_build::build_ebpf(
+        [Package {
+            name: "bindfetto-ebpf",
+            root_dir: "../bindfetto-ebpf",
+            no_default_features: false,
+            features: &[],
+        }],
+        // Pinned nightly is fine; Toolchain::Nightly uses `nightly`.
+        Toolchain::default(),
+    )
+    .expect("build bindfetto-ebpf for the bpf target");
 }
