@@ -10,7 +10,8 @@
 //! name itself is resolved offline against the AIDL catalog (later milestone).
 //!
 //! Sink: `--sink console|logcat|both` (default console). Logcat lines use tag
-//! `bindfetto` and carry the `BF1` marker so the offline decoder can select them.
+//! `bindfetto` and carry the `BINDFETTO` marker so the offline decoder can select
+//! them.
 
 use std::collections::HashMap;
 use std::fs;
@@ -30,8 +31,8 @@ static EBPF_OBJ: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/
 /// Logcat tag; the decoder can select bindfetto lines with `logcat -s bindfetto`.
 const LOG_TAG: &str = "bindfetto";
 /// In-message marker so bindfetto lines are identifiable even in a merged/DLT log
-/// where the tag may be flattened. Versioned so the line format can evolve.
-const LOG_MARKER: &str = "BF1";
+/// where the tag may be flattened.
+const LOG_MARKER: &str = "BINDFETTO";
 
 /// Output destination for formatted transaction lines.
 #[derive(Clone, Copy)]

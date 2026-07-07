@@ -21,7 +21,7 @@ Vertical slices; each one runs on the AVD before the next starts.
   BPF map of wanted hashes to drop before the ring buffer.
 - **M5 — errors + sinks + CLI.** In progress.
   - ✅ Console sink with wall-clock timestamp.
-  - ✅ Logcat sink (`--sink console|logcat|both`), tag `bindfetto` + `BF1` marker.
+  - ✅ Logcat sink (`--sink console|logcat|both`), tag `bindfetto` + `BINDFETTO` marker.
   - ⏳ File / JSONL sink.
   - ⏳ Second attach point for `BR_FAILED_REPLY`/`BR_DEAD_REPLY` (toggleable).
   - ⏳ Full CLI (interface filter, `--include-replies`, error toggle).
