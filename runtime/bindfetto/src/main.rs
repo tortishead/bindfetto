@@ -47,6 +47,8 @@ async fn main() -> anyhow::Result<()> {
     let ring = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS map missing")?)?;
     let mut async_ring = AsyncFd::new(ring)?;
     let mut names = NameCache::default();
+    // Kernel events carry CLOCK_MONOTONIC ns; this offset maps them to wall-clock.
+    let boot_offset_ns = monotonic_to_realtime_offset_ns();
 
     println!("bindfetto: capturing binder transactions (Ctrl-C to stop)");
 
@@ -55,13 +57,14 @@ async fn main() -> anyhow::Result<()> {
         let ring = guard.get_inner_mut();
         while let Some(item) = ring.next() {
             let ev: &TxEvent = unsafe { &*(item.as_ptr() as *const TxEvent) };
-            print_event(ev, &mut names);
+            print_event(ev, &mut names, boot_offset_ns);
         }
         guard.clear_ready();
     }
 }
 
-fn print_event(ev: &TxEvent, names: &mut NameCache) {
+fn print_event(ev: &TxEvent, names: &mut NameCache, boot_offset_ns: i128) {
+    let ts = format_timestamp(ev.ts_ns, boot_offset_ns);
     let src = names.get(ev.src_pid).to_owned();
     let dst = names.get(ev.dst_pid).to_owned();
     let oneway = if ev.is_oneway() { " oneway" } else { "" };
@@ -73,9 +76,37 @@ fn print_event(ev: &TxEvent, names: &mut NameCache) {
         None => format!("<non-aidl code:{}>", ev.code),
     };
     println!(
-        "{src} ({}) -> {dst} ({}): {label}, {}B{oneway}",
+        "{ts} {src} ({}) -> {dst} ({}): {label}, {}B{oneway}",
         ev.src_pid, ev.dst_pid, ev.data_size
     );
+}
+
+/// Nanoseconds to add to a `CLOCK_MONOTONIC` timestamp to get `CLOCK_REALTIME`
+/// (Unix epoch) nanoseconds. Sampled once; good enough for display.
+fn monotonic_to_realtime_offset_ns() -> i128 {
+    fn clock_ns(clk: libc::clockid_t) -> i128 {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe { libc::clock_gettime(clk, &mut ts) };
+        ts.tv_sec as i128 * 1_000_000_000 + ts.tv_nsec as i128
+    }
+    clock_ns(libc::CLOCK_REALTIME) - clock_ns(libc::CLOCK_MONOTONIC)
+}
+
+/// Format a kernel monotonic timestamp as local wall-clock `HH:MM:SS.mmm`.
+fn format_timestamp(ts_ns: u64, boot_offset_ns: i128) -> String {
+    let wall_ns = ts_ns as i128 + boot_offset_ns;
+    let secs = (wall_ns / 1_000_000_000) as i64;
+    let nsec = (wall_ns % 1_000_000_000) as u32;
+    match chrono::DateTime::from_timestamp(secs, nsec) {
+        Some(dt) => dt
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S%.3f")
+            .to_string(),
+        None => "--:--:--.---".to_string(),
+    }
 }
 
 /// Decode the interface descriptor from the event's UTF-16LE bytes.
