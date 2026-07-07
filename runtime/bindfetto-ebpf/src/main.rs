@@ -61,11 +61,18 @@ pub fn binder_transaction_enter(ctx: ProbeContext) -> u32 {
 }
 
 fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
+    // arg3 = int reply. The tracepoint drops replies, so skip all their work here
+    // too (user-memory reads + stash insert) — replies are ~half of all traffic.
+    // Truncate to u32: the ABI doesn't guarantee the register's upper bits for int.
+    let reply: usize = ctx.arg(3).ok_or(1i64)?;
+    if reply as u32 != 0 {
+        return Ok(());
+    }
+
     // arg2 = struct binder_transaction_data *tr (kernel pointer to a copied-in struct)
     let tr: usize = ctx.arg(2).ok_or(1i64)?;
 
-    let data_size =
-        unsafe { bpf_probe_read_kernel((tr + TR_DATA_SIZE) as *const u64) }? as u32;
+    let data_size = unsafe { bpf_probe_read_kernel((tr + TR_DATA_SIZE) as *const u64) }? as u32;
     let buf_ptr = unsafe { bpf_probe_read_kernel((tr + TR_BUFFER_PTR) as *const u64) }? as usize;
 
     let mut stash = Stash {
@@ -75,16 +82,34 @@ fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
     };
 
     // The parcel data lives in the sender's userspace at buf_ptr. If it starts with
-    // an interface token, offset 8 holds the 'SYST' magic.
-    let magic = unsafe { bpf_probe_read_user((buf_ptr + P_MAGIC) as *const u32) }.unwrap_or(0);
-    if magic == IFACE_HEADER_MAGIC {
-        let units = unsafe { bpf_probe_read_user((buf_ptr + P_STRLEN) as *const u32) }.unwrap_or(0);
-        let nbytes = core::cmp::min((units as usize).saturating_mul(2), MAX_IFACE_BYTES);
-        // Read a fixed MAX to keep the verifier happy; the logical length is nbytes.
-        if unsafe { bpf_probe_read_user_buf((buf_ptr + P_STR) as *const u8, &mut stash.iface) }
-            .is_ok()
-        {
-            stash.iface_byte_len = nbytes as u32;
+    // an interface token, offset 8 holds the 'SYST' magic. A parcel smaller than the
+    // token header (16 bytes) can't carry one — don't even read the magic.
+    if data_size as usize >= P_STR {
+        let magic = unsafe { bpf_probe_read_user((buf_ptr + P_MAGIC) as *const u32) }.unwrap_or(0);
+        if magic == IFACE_HEADER_MAGIC {
+            let units =
+                unsafe { bpf_probe_read_user((buf_ptr + P_STRLEN) as *const u32) }.unwrap_or(0);
+            // Read only the descriptor's own bytes, clamped to our buffer and to the
+            // parcel payload: a fixed 128-byte read could cross into an unmapped page
+            // past a short parcel and fail, losing a perfectly valid descriptor.
+            //
+            // Verifier note: clamp BOTH candidates against the constant MAX first.
+            // A reg-vs-reg min doesn't propagate bounds to the selected register, so
+            // min(unbounded, bounded) is rejected as "unbounded memory access".
+            let want = core::cmp::min((units as usize).saturating_mul(2), MAX_IFACE_BYTES);
+            let avail = core::cmp::min(data_size as usize - P_STR, MAX_IFACE_BYTES);
+            let nbytes = core::cmp::min(want, avail);
+            if nbytes > 0
+                && unsafe {
+                    bpf_probe_read_user_buf(
+                        (buf_ptr + P_STR) as *const u8,
+                        &mut stash.iface[..nbytes],
+                    )
+                }
+                .is_ok()
+            {
+                stash.iface_byte_len = nbytes as u32;
+            }
         }
     }
 
