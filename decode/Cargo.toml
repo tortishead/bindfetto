@@ -1,0 +1,18 @@
+[package]
+name = "bindfetto-decode"
+version = "0.1.0"
+edition = "2021"
+description = "Offline method-name decoding for bindfetto logs (plugin-agnostic core + CLI)."
+license = "Apache-2.0"
+
+[lib]
+name = "bindfetto_decode"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bindfetto-decode"
+path = "src/main.rs"
+
+[dependencies]
+serde = "1"
+serde_json = "1"

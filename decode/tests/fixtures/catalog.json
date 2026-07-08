@@ -1,0 +1,9 @@
+{
+  "android.app.IActivityManager": {
+    "1": "getTasks",
+    "7": "startActivity"
+  },
+  "android.app.ITaskStackListener": {
+    "12": "onTaskMovedToFront"
+  }
+}

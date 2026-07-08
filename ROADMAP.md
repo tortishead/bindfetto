@@ -31,9 +31,14 @@ Vertical slices; each one runs on the AVD before the next starts.
 - **B1 — catalog builder** (`catalog/`, Python): folder of AIDL → JSON catalog via
   generated stubs / `aidl --dumpapi`; handle explicit `= N` ids and special
   transactions.
-- **B2 — shared decoder core + `bindfetto-decode` CLI**: line parse + catalog
-  lookup → method name.
-- **B3 — viewer plugins**: VS Code first, DLT Viewer for the automotive audience.
+- **B2 — shared decoder core + `bindfetto-decode` CLI** (`decode/`, Rust): line
+  parse + catalog lookup → method name. In progress.
+  - ✅ Core crate: `Catalog`/`Decoder`, prefix-agnostic `decode_line` rewrite,
+    structured `Record`/`Label` parse, special-transaction table, unit tests.
+  - ✅ `bindfetto-decode` stdin→stdout / file CLI.
+  - ⏳ C ABI (cbindgen) for the DLT plugin; WASM (wasm-bindgen) for VS Code.
+- **B3 — viewer plugins**: VS Code first (WASM over the core), DLT Viewer (C++/Qt
+  `QDltPluginDecoderInterface` over the C ABI) for the automotive audience.
 
 ## Track C — control app (`app/`, Kotlin)
 
