@@ -19,9 +19,19 @@ recognizes them (`isMsg`).
 - **`isMsg`** — true when the message payload contains `BINDFETTO`.
 - **`decodeMsg`** — passes the payload text through `bf_decode_line`, then replaces the
   message with a single UTF-8 string argument holding the decoded line.
-- **`loadConfig(path)`** — the plugin's config file (set in the DLT Viewer plugin
-  manager) is the **AIDL catalog JSON** (Track B1 output). Without a catalog loaded,
-  `isMsg` returns false and messages pass through untouched.
+- **`loadConfig(path)`** — the plugin's config (set in the DLT Viewer plugin manager)
+  is the **AIDL catalog** (Track B1 output): either a single JSON file, or a **folder**,
+  in which case every `*.json` under it is merged into one catalog (via `QJsonObject`;
+  later files win per code). Without a catalog loaded, `isMsg` returns false and
+  messages pass through untouched.
+
+## Getting bindfetto into DLT
+
+On automotive targets the OEM usually bridges logcat into DLT, so bindfetto's logcat
+lines arrive as DLT messages for this plugin to decode. Where that bridge is **absent**,
+run the bindfetto binary with `--dlt`: it injects the marked lines straight into the
+DLT daemon (via libdlt), so they show up in DLT Viewer's live trace — and this plugin
+decodes them the same way.
 
 ## Build
 

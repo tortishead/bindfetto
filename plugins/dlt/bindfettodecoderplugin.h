@@ -46,6 +46,9 @@ public:
     bool decodeMsg(QDltMsg &msg, int triggeredByUser) override;
 
 private:
+    // Merge every *.json under `dir` (recursively) into one catalog JSON in `out`.
+    bool mergeCatalogDir(const QString &dir, QByteArray &out);
+
     BfDecoder *m_decoder = nullptr;  // owned; NULL until a catalog is loaded
     QString m_catalogPath;
     QString m_error;

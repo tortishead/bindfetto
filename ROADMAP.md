@@ -24,6 +24,10 @@ Vertical slices; each one runs on the AVD before the next starts.
   - ✅ Logcat sink (`--sink console|logcat|both|none`), tag `bindfetto` + `BINDFETTO` marker.
   - ✅ File / JSONL sink (`--jsonl <path>`, composes with any `--sink`; one JSON object
     per transaction). Verified live on the AVD (671 records, all valid JSON).
+  - ✅ DLT sink (`--dlt`): injects the marked lines into the DLT daemon via
+    runtime-`dlopen`ed libdlt, so DLT Viewer shows them live without an OEM logcat->DLT
+    bridge. Builds for the target; graceful-fail path verified on the AVD (no libdlt).
+    Live injection needs an automotive target with a dlt-daemon.
   - ⏳ Second attach point for `BR_FAILED_REPLY`/`BR_DEAD_REPLY` (toggleable).
   - ⏳ Full CLI (interface filter, `--include-replies`, error toggle).
 
@@ -47,10 +51,12 @@ Vertical slices; each one runs on the AVD before the next starts.
 - **B3 — viewer plugins**:
   - ✅ DLT Viewer plugin (`plugins/dlt/`, C++/Qt `QDLTPluginDecoderInterface` over the
     C ABI): verified end-to-end on macOS (Qt 6.11) — loads via `QPluginLoader`,
-    `decodeMsg` rewrites via the core.
+    `decodeMsg` rewrites via the core. `loadConfig` takes a catalog file or a folder
+    (merged via `QJsonObject`).
   - ✅ VS Code extension (`plugins/vscode/`, TypeScript over the WASM core): one command
     (**Decode Active Editor**) + `bindfetto.catalogPath` setting; `src/decoder.ts`
-    marshals strings across the wasm boundary. Verified on Node 26: wasm builds/exports,
+    marshals strings across the wasm boundary. `bindfetto.catalogPath` takes a catalog
+    file or a folder (every *.json merged). Verified on Node 26: wasm builds/exports,
     `tsc` clean, Node smoke + compiled-decoder end-to-end decode pass.
 
 ## Track C — control app (`app/`, Kotlin)

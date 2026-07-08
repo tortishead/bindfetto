@@ -1,7 +1,12 @@
 #include "bindfettodecoderplugin.h"
 
 #include <QByteArray>
+#include <QDirIterator>
 #include <QFile>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QStringList>
 
 #include "qdltmsg.h"       // QDltMsg
 #include "qdltargument.h"  // QDltArgument
@@ -49,20 +54,27 @@ QString BindfettoDecoderPlugin::error()
 }
 
 // The plugin's "config file" (set in the DLT Viewer plugin manager) is the AIDL
-// catalog JSON produced by the Track B1 builder.
+// catalog produced by the Track B1 builder: either a single JSON file, or a folder —
+// in which case every *.json under it (recursively) is merged into one catalog.
 bool BindfettoDecoderPlugin::loadConfig(QString filename)
 {
-    QFile file(filename);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        m_error = QStringLiteral("cannot open catalog: %1").arg(filename);
-        return false;
+    QByteArray json;
+    if (QFileInfo(filename).isDir()) {
+        if (!mergeCatalogDir(filename, json)) {
+            return false;  // m_error set inside
+        }
+    } else {
+        QFile file(filename);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            m_error = QStringLiteral("cannot open catalog: %1").arg(filename);
+            return false;
+        }
+        json = file.readAll();
     }
-    const QByteArray json = file.readAll();
-    file.close();
 
     BfDecoder *decoder = bf_decoder_new(json.constData());
     if (!decoder) {
-        m_error = QStringLiteral("invalid catalog JSON: %1").arg(filename);
+        m_error = QStringLiteral("invalid catalog: %1").arg(filename);
         return false;
     }
 
@@ -72,6 +84,47 @@ bool BindfettoDecoderPlugin::loadConfig(QString filename)
     m_decoder = decoder;
     m_catalogPath = filename;
     m_error.clear();
+    return true;
+}
+
+bool BindfettoDecoderPlugin::mergeCatalogDir(const QString &dir, QByteArray &out)
+{
+    QStringList paths;
+    QDirIterator it(dir, QStringList{QStringLiteral("*.json")}, QDir::Files,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        paths << it.next();
+    }
+    paths.sort();  // deterministic order; later files win per code
+
+    QJsonObject merged;
+    for (const QString &path : paths) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+        QJsonParseError perr{};
+        const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &perr);
+        f.close();
+        if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+            m_error = QStringLiteral("invalid catalog %1: %2").arg(path, perr.errorString());
+            return false;
+        }
+        const QJsonObject obj = doc.object();
+        for (auto iface = obj.begin(); iface != obj.end(); ++iface) {
+            QJsonObject codes = merged.value(iface.key()).toObject();
+            const QJsonObject add = iface.value().toObject();
+            for (auto c = add.begin(); c != add.end(); ++c) {
+                codes.insert(c.key(), c.value());
+            }
+            merged.insert(iface.key(), codes);
+        }
+    }
+    if (merged.isEmpty()) {
+        m_error = QStringLiteral("no .json catalog files under %1").arg(dir);
+        return false;
+    }
+    out = QJsonDocument(merged).toJson(QJsonDocument::Compact);
     return true;
 }
 

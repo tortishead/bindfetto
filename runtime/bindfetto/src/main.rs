@@ -11,9 +11,14 @@
 //!
 //! Sinks: `--sink console|logcat|both|none` (default console) for human-readable
 //! lines — logcat lines use tag `bindfetto` and carry the `BINDFETTO` marker so the
-//! offline decoder can select them. Independently, `--jsonl <path>` writes one
-//! structured JSON object per transaction to a file for offline capture and decoding;
-//! it composes with any `--sink` (use `--sink none` for a file-only capture).
+//! offline decoder can select them. Independently:
+//!
+//! * `--jsonl <path>` writes one structured JSON object per transaction to a file for
+//!   offline capture and decoding.
+//! * `--dlt` injects the marked lines straight into the DLT daemon (via libdlt), so
+//!   DLT Viewer shows them **live** even without an OEM logcat->DLT bridge.
+//!
+//! Both compose with any `--sink` (use `--sink none` for a quiet, sink-only capture).
 
 use std::collections::HashMap;
 use std::fs;
@@ -92,6 +97,114 @@ mod logcat {
     }
 }
 
+/// Optional DLT (Diagnostic Log and Trace) sink for automotive targets.
+///
+/// libdlt isn't in the NDK and is present only where the OEM ships DLT, so it's
+/// resolved at runtime via `dlopen` — the binary always builds, and `--dlt` only
+/// activates where `libdlt` + a running `dlt-daemon` exist. Injecting directly lets
+/// DLT Viewer show bindfetto's traffic **live** even when there's no logcat->DLT
+/// bridge to carry it.
+mod dlt {
+    use std::os::raw::{c_char, c_int, c_void};
+
+    use std::ffi::CString;
+
+    /// `DLT_LOG_INFO` from dlt's `DltLogLevelType`.
+    const DLT_LOG_INFO: c_int = 4;
+
+    // libdlt C API (dlt_user.h). DltContext is passed by pointer; we hand libdlt an
+    // over-allocated, zeroed buffer so its exact layout/size need not be known here.
+    type RegisterApp = unsafe extern "C" fn(*const c_char, *const c_char) -> c_int;
+    type RegisterContext = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int;
+    type LogString = unsafe extern "C" fn(*mut c_void, c_int, *const c_char) -> c_int;
+    type UnregisterContext = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type UnregisterApp = unsafe extern "C" fn() -> c_int;
+
+    /// A live DLT registration. Logs each line under app/context ids to the daemon.
+    pub struct Dlt {
+        lib: *mut c_void,
+        // libdlt keeps using this after registration, so it must outlive logging and
+        // never move — hence a heap box. 256 zeroed bytes comfortably covers DltContext.
+        ctx: Box<[u8; 256]>,
+        log_string: LogString,
+        unregister_context: UnregisterContext,
+        unregister_app: UnregisterApp,
+    }
+
+    impl Dlt {
+        /// Load libdlt, register `appid`/`ctxid` (each <= 4 chars), ready to log.
+        pub fn open(appid: &str, ctxid: &str) -> Result<Self, String> {
+            unsafe {
+                let lib = dlopen_any(&["libdlt.so", "libdlt.so.2"])?;
+                let register_app: RegisterApp = sym(lib, "dlt_register_app")?;
+                let register_context: RegisterContext = sym(lib, "dlt_register_context")?;
+                let log_string: LogString = sym(lib, "dlt_log_string")?;
+                let unregister_context: UnregisterContext = sym(lib, "dlt_unregister_context")?;
+                let unregister_app: UnregisterApp = sym(lib, "dlt_unregister_app")?;
+
+                let app = CString::new(appid).map_err(|_| "invalid DLT app id")?;
+                let cid = CString::new(ctxid).map_err(|_| "invalid DLT context id")?;
+                let desc = CString::new("bindfetto").unwrap();
+
+                let mut ctx = Box::new([0u8; 256]);
+                register_app(app.as_ptr(), desc.as_ptr());
+                register_context(ctx.as_mut_ptr() as *mut c_void, cid.as_ptr(), desc.as_ptr());
+
+                Ok(Dlt {
+                    lib,
+                    ctx,
+                    log_string,
+                    unregister_context,
+                    unregister_app,
+                })
+            }
+        }
+
+        /// Send one line to the DLT daemon at INFO level.
+        pub fn log(&mut self, msg: &str) {
+            if let Ok(c) = CString::new(msg) {
+                unsafe {
+                    (self.log_string)(self.ctx.as_mut_ptr() as *mut c_void, DLT_LOG_INFO, c.as_ptr());
+                }
+            }
+        }
+    }
+
+    impl Drop for Dlt {
+        fn drop(&mut self) {
+            unsafe {
+                (self.unregister_context)(self.ctx.as_mut_ptr() as *mut c_void);
+                (self.unregister_app)();
+                libc::dlclose(self.lib);
+            }
+        }
+    }
+
+    unsafe fn dlopen_any(names: &[&str]) -> Result<*mut c_void, String> {
+        for name in names {
+            let c = CString::new(*name).unwrap();
+            let handle = libc::dlopen(c.as_ptr(), libc::RTLD_NOW);
+            if !handle.is_null() {
+                return Ok(handle);
+            }
+        }
+        Err(format!(
+            "libdlt not found (tried {names:?}); the DLT sink needs libdlt + a dlt-daemon on the target"
+        ))
+    }
+
+    /// Resolve a libdlt symbol into a typed function pointer.
+    unsafe fn sym<T>(lib: *mut c_void, name: &str) -> Result<T, String> {
+        let c = CString::new(name).unwrap();
+        let ptr = libc::dlsym(lib, c.as_ptr());
+        if ptr.is_null() {
+            return Err(format!("libdlt is missing symbol {name}"));
+        }
+        // dlsym yields a function address; T is a pointer-sized `extern "C" fn`.
+        Ok(std::mem::transmute_copy::<*mut c_void, T>(&ptr))
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut ebpf = Ebpf::load(EBPF_OBJ).context("load eBPF object")?;
@@ -120,13 +233,18 @@ async fn main() -> anyhow::Result<()> {
         )),
         None => None,
     };
+    let dlt = if args.iter().any(|a| a == "--dlt") {
+        Some(dlt::Dlt::open("BFTO", "BIND").map_err(anyhow::Error::msg).context("enable DLT sink")?)
+    } else {
+        None
+    };
 
     let ring = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS map missing")?)?;
     let mut async_ring = AsyncFd::new(ring)?;
     let mut names = NameCache::default();
     // Kernel events carry CLOCK_MONOTONIC ns; this offset maps them to wall-clock.
     let boot_offset_ns = monotonic_to_realtime_offset_ns();
-    let mut emitter = Emitter::new(sink, boot_offset_ns, jsonl);
+    let mut emitter = Emitter::new(sink, boot_offset_ns, jsonl, dlt);
 
     println!("bindfetto: capturing binder transactions (Ctrl-C to stop)");
 
@@ -150,17 +268,24 @@ struct Emitter {
     sink: Sink,
     boot_offset_ns: i128,
     jsonl: Option<BufWriter<fs::File>>,
+    dlt: Option<dlt::Dlt>,
     core: String,
     scratch: String,
     json: String,
 }
 
 impl Emitter {
-    fn new(sink: Sink, boot_offset_ns: i128, jsonl: Option<BufWriter<fs::File>>) -> Self {
+    fn new(
+        sink: Sink,
+        boot_offset_ns: i128,
+        jsonl: Option<BufWriter<fs::File>>,
+        dlt: Option<dlt::Dlt>,
+    ) -> Self {
         Self {
             sink,
             boot_offset_ns,
             jsonl,
+            dlt,
             core: String::new(),
             scratch: String::new(),
             json: String::new(),
@@ -187,6 +312,16 @@ impl Emitter {
             self.scratch.push(' ');
             self.scratch.push_str(&self.core);
             logcat::write(LOG_TAG, &self.scratch);
+        }
+        if self.dlt.is_some() {
+            // DLT records its own timestamp; carry the marker + core line, same as logcat.
+            self.scratch.clear();
+            self.scratch.push_str(LOG_MARKER);
+            self.scratch.push(' ');
+            self.scratch.push_str(&self.core);
+            if let Some(d) = self.dlt.as_mut() {
+                d.log(&self.scratch);
+            }
         }
         if self.jsonl.is_some() {
             self.write_jsonl(ev, names);
