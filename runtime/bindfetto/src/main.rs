@@ -15,14 +15,18 @@
 //!
 //! * `--jsonl <path>` writes one structured JSON object per transaction to a file for
 //!   offline capture and decoding.
-//! * `--dlt` injects the marked lines straight into the DLT daemon (via libdlt), so
-//!   DLT Viewer shows them **live** even without an OEM logcat->DLT bridge.
+//! * `--dlt-serve [port]` makes bindfetto itself a DLT server (default port 3490):
+//!   DLT Viewer connects over TCP and shows the transactions **live**, even without an
+//!   OEM logcat->DLT bridge or any dlt-daemon.
 //!
 //! Both compose with any `--sink` (use `--sink none` for a quiet, sink-only capture).
+
+mod dlt_wire;
 
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufWriter, Write as _};
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use aya::{
@@ -97,111 +101,60 @@ mod logcat {
     }
 }
 
-/// Optional DLT (Diagnostic Log and Trace) sink for automotive targets.
+/// Embedded DLT server: bindfetto itself is the endpoint DLT Viewer connects to.
 ///
-/// libdlt isn't in the NDK and is present only where the OEM ships DLT, so it's
-/// resolved at runtime via `dlopen` — the binary always builds, and `--dlt` only
-/// activates where `libdlt` + a running `dlt-daemon` exist. Injecting directly lets
-/// DLT Viewer show bindfetto's traffic **live** even when there's no logcat->DLT
-/// bridge to carry it.
+/// It listens on TCP and streams each transaction as a verbose DLT message (see
+/// [`dlt_wire`]). This makes bindfetto self-contained for DLT Viewer **live trace**
+/// with no libdlt and no separate `dlt-daemon` — the fallback for targets where the
+/// OEM does not bridge logcat into DLT. Connect DLT Viewer to the port as a TCP ECU
+/// (e.g. `adb forward tcp:3490 tcp:3490`, then `localhost:3490`).
 mod dlt {
-    use std::os::raw::{c_char, c_int, c_void};
+    use std::sync::Arc;
 
-    use std::ffi::CString;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::broadcast;
 
-    /// `DLT_LOG_INFO` from dlt's `DltLogLevelType`.
-    const DLT_LOG_INFO: c_int = 4;
-
-    // libdlt C API (dlt_user.h). DltContext is passed by pointer; we hand libdlt an
-    // over-allocated, zeroed buffer so its exact layout/size need not be known here.
-    type RegisterApp = unsafe extern "C" fn(*const c_char, *const c_char) -> c_int;
-    type RegisterContext = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int;
-    type LogString = unsafe extern "C" fn(*mut c_void, c_int, *const c_char) -> c_int;
-    type UnregisterContext = unsafe extern "C" fn(*mut c_void) -> c_int;
-    type UnregisterApp = unsafe extern "C" fn() -> c_int;
-
-    /// A live DLT registration. Logs each line under app/context ids to the daemon.
-    pub struct Dlt {
-        lib: *mut c_void,
-        // libdlt keeps using this after registration, so it must outlive logging and
-        // never move — hence a heap box. 256 zeroed bytes comfortably covers DltContext.
-        ctx: Box<[u8; 256]>,
-        log_string: LogString,
-        unregister_context: UnregisterContext,
-        unregister_app: UnregisterApp,
+    /// A running DLT TCP server. Encoded messages handed to [`send`](Self::send) are
+    /// fanned out to every currently-connected DLT Viewer client.
+    pub struct DltServer {
+        tx: broadcast::Sender<Arc<[u8]>>,
     }
 
-    impl Dlt {
-        /// Load libdlt, register `appid`/`ctxid` (each <= 4 chars), ready to log.
-        pub fn open(appid: &str, ctxid: &str) -> Result<Self, String> {
-            unsafe {
-                let lib = dlopen_any(&["libdlt.so", "libdlt.so.2"])?;
-                let register_app: RegisterApp = sym(lib, "dlt_register_app")?;
-                let register_context: RegisterContext = sym(lib, "dlt_register_context")?;
-                let log_string: LogString = sym(lib, "dlt_log_string")?;
-                let unregister_context: UnregisterContext = sym(lib, "dlt_unregister_context")?;
-                let unregister_app: UnregisterApp = sym(lib, "dlt_unregister_app")?;
-
-                let app = CString::new(appid).map_err(|_| "invalid DLT app id")?;
-                let cid = CString::new(ctxid).map_err(|_| "invalid DLT context id")?;
-                let desc = CString::new("bindfetto").unwrap();
-
-                let mut ctx = Box::new([0u8; 256]);
-                register_app(app.as_ptr(), desc.as_ptr());
-                register_context(ctx.as_mut_ptr() as *mut c_void, cid.as_ptr(), desc.as_ptr());
-
-                Ok(Dlt {
-                    lib,
-                    ctx,
-                    log_string,
-                    unregister_context,
-                    unregister_app,
-                })
-            }
-        }
-
-        /// Send one line to the DLT daemon at INFO level.
-        pub fn log(&mut self, msg: &str) {
-            if let Ok(c) = CString::new(msg) {
-                unsafe {
-                    (self.log_string)(self.ctx.as_mut_ptr() as *mut c_void, DLT_LOG_INFO, c.as_ptr());
+    impl DltServer {
+        /// Bind the server and spawn its accept loop.
+        pub async fn bind(port: u16) -> std::io::Result<Self> {
+            let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+            // Buffer a burst of messages per client; a slow/absent client just lags.
+            let (tx, _rx) = broadcast::channel::<Arc<[u8]>>(4096);
+            let accept_tx = tx.clone();
+            tokio::spawn(async move {
+                while let Ok((sock, _addr)) = listener.accept().await {
+                    let mut rx = accept_tx.subscribe();
+                    tokio::spawn(async move {
+                        let (_read, mut write) = sock.into_split();
+                        loop {
+                            match rx.recv().await {
+                                Ok(buf) => {
+                                    if write.write_all(&buf).await.is_err() {
+                                        break; // client went away
+                                    }
+                                }
+                                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    });
                 }
-            }
+            });
+            Ok(DltServer { tx })
         }
-    }
 
-    impl Drop for Dlt {
-        fn drop(&mut self) {
-            unsafe {
-                (self.unregister_context)(self.ctx.as_mut_ptr() as *mut c_void);
-                (self.unregister_app)();
-                libc::dlclose(self.lib);
-            }
+        /// Fan an encoded message out to connected clients (non-blocking; a no-op when
+        /// nobody is connected).
+        pub fn send(&self, bytes: Arc<[u8]>) {
+            let _ = self.tx.send(bytes);
         }
-    }
-
-    unsafe fn dlopen_any(names: &[&str]) -> Result<*mut c_void, String> {
-        for name in names {
-            let c = CString::new(*name).unwrap();
-            let handle = libc::dlopen(c.as_ptr(), libc::RTLD_NOW);
-            if !handle.is_null() {
-                return Ok(handle);
-            }
-        }
-        Err(format!(
-            "libdlt not found (tried {names:?}); the DLT sink needs libdlt + a dlt-daemon on the target"
-        ))
-    }
-
-    /// Resolve a libdlt symbol into a typed function pointer.
-    unsafe fn sym<T>(lib: *mut c_void, name: &str) -> Result<T, String> {
-        let c = CString::new(name).unwrap();
-        let ptr = libc::dlsym(lib, c.as_ptr());
-        if ptr.is_null() {
-            return Err(format!("libdlt is missing symbol {name}"));
-        }
-        // dlsym yields a function address; T is a pointer-sized `extern "C" fn`.
-        Ok(std::mem::transmute_copy::<*mut c_void, T>(&ptr))
     }
 }
 
@@ -233,10 +186,19 @@ async fn main() -> anyhow::Result<()> {
         )),
         None => None,
     };
-    let dlt = if args.iter().any(|a| a == "--dlt") {
-        Some(dlt::Dlt::open("BFTO", "BIND").map_err(anyhow::Error::msg).context("enable DLT sink")?)
-    } else {
-        None
+    let dlt = match args.iter().position(|a| a == "--dlt-serve") {
+        Some(i) => {
+            let port = args
+                .get(i + 1)
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(3490);
+            let server = dlt::DltServer::bind(port)
+                .await
+                .with_context(|| format!("bind DLT server on port {port}"))?;
+            println!("bindfetto: DLT server on 0.0.0.0:{port} — connect DLT Viewer as a TCP ECU");
+            Some(DltState::new(server))
+        }
+        None => None,
     };
 
     let ring = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS map missing")?)?;
@@ -264,11 +226,34 @@ async fn main() -> anyhow::Result<()> {
 
 /// Owns the output config plus buffers reused across every event, so no sink
 /// allocates on the heap per line (buffer capacity is retained between calls).
+/// The DLT server plus its per-message encode state (reused across events).
+struct DltState {
+    server: dlt::DltServer,
+    counter: u8,
+    buf: Vec<u8>,
+    ecu: [u8; 4],
+    apid: [u8; 4],
+    ctid: [u8; 4],
+}
+
+impl DltState {
+    fn new(server: dlt::DltServer) -> Self {
+        Self {
+            server,
+            counter: 0,
+            buf: Vec::new(),
+            ecu: dlt_wire::id4("BFTO"),
+            apid: dlt_wire::id4("BFTO"),
+            ctid: dlt_wire::id4("BIND"),
+        }
+    }
+}
+
 struct Emitter {
     sink: Sink,
     boot_offset_ns: i128,
     jsonl: Option<BufWriter<fs::File>>,
-    dlt: Option<dlt::Dlt>,
+    dlt: Option<DltState>,
     core: String,
     scratch: String,
     json: String,
@@ -279,7 +264,7 @@ impl Emitter {
         sink: Sink,
         boot_offset_ns: i128,
         jsonl: Option<BufWriter<fs::File>>,
-        dlt: Option<dlt::Dlt>,
+        dlt: Option<DltState>,
     ) -> Self {
         Self {
             sink,
@@ -314,13 +299,26 @@ impl Emitter {
             logcat::write(LOG_TAG, &self.scratch);
         }
         if self.dlt.is_some() {
-            // DLT records its own timestamp; carry the marker + core line, same as logcat.
+            // Carry the marker + core line (same content as logcat) as a verbose DLT
+            // message. DLT stamps reception time; we pass the kernel monotonic time as
+            // the message timestamp (0.1 ms units).
             self.scratch.clear();
             self.scratch.push_str(LOG_MARKER);
             self.scratch.push(' ');
             self.scratch.push_str(&self.core);
+            let ts_tenths_ms = (ev.ts_ns / 100_000) as u32;
             if let Some(d) = self.dlt.as_mut() {
-                d.log(&self.scratch);
+                dlt_wire::encode(
+                    &mut d.buf,
+                    d.counter,
+                    ts_tenths_ms,
+                    &d.ecu,
+                    &d.apid,
+                    &d.ctid,
+                    &self.scratch,
+                );
+                d.counter = d.counter.wrapping_add(1);
+                d.server.send(Arc::from(&d.buf[..]));
             }
         }
         if self.jsonl.is_some() {

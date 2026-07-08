@@ -59,10 +59,11 @@ The consumer writes each formatted log line to one of (`--sink console|logcat|bo
 - **local file (JSONL)** — `--jsonl <path>` writes one structured JSON object per
   transaction for offline capture and decoding. Composes with any `--sink` (use
   `--sink none` for a file-only capture).
-- **DLT** — `--dlt` injects the marked lines into the DLT daemon (via runtime-loaded
-  libdlt), so DLT Viewer shows them **live**. This is a fallback for targets where the
-  OEM does *not* bridge logcat into DLT; where the bridge exists, the logcat sink
-  already reaches DLT.
+- **DLT server** — `--dlt-serve [port]` (default 3490) makes bindfetto itself the DLT
+  endpoint: it streams each transaction as a verbose DLT message over TCP, so DLT Viewer
+  connects as a TCP ECU and shows them **live** — no libdlt and no dlt-daemon. This is
+  the fallback for targets where the OEM does *not* bridge logcat into DLT; where the
+  bridge exists, the logcat sink already reaches DLT.
 
 ### Process name resolution
 

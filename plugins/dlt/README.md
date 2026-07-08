@@ -29,9 +29,16 @@ recognizes them (`isMsg`).
 
 On automotive targets the OEM usually bridges logcat into DLT, so bindfetto's logcat
 lines arrive as DLT messages for this plugin to decode. Where that bridge is **absent**,
-run the bindfetto binary with `--dlt`: it injects the marked lines straight into the
-DLT daemon (via libdlt), so they show up in DLT Viewer's live trace — and this plugin
-decodes them the same way.
+run the bindfetto binary with `--dlt-serve [port]` (default 3490): bindfetto becomes a
+DLT TCP endpoint and streams each transaction as a verbose DLT message — no libdlt, no
+dlt-daemon. Connect DLT Viewer to it as a TCP ECU:
+
+```sh
+adb forward tcp:3490 tcp:3490
+# then in DLT Viewer add a TCP ECU at localhost:3490
+```
+
+The lines show up in DLT Viewer's live trace and this plugin decodes them the same way.
 
 ## Build
 

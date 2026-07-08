@@ -24,10 +24,11 @@ Vertical slices; each one runs on the AVD before the next starts.
   - ✅ Logcat sink (`--sink console|logcat|both|none`), tag `bindfetto` + `BINDFETTO` marker.
   - ✅ File / JSONL sink (`--jsonl <path>`, composes with any `--sink`; one JSON object
     per transaction). Verified live on the AVD (671 records, all valid JSON).
-  - ✅ DLT sink (`--dlt`): injects the marked lines into the DLT daemon via
-    runtime-`dlopen`ed libdlt, so DLT Viewer shows them live without an OEM logcat->DLT
-    bridge. Builds for the target; graceful-fail path verified on the AVD (no libdlt).
-    Live injection needs an automotive target with a dlt-daemon.
+  - ✅ DLT server (`--dlt-serve [port]`, default 3490): bindfetto is itself the DLT
+    endpoint — streams each transaction as a verbose DLT message over TCP, so DLT Viewer
+    connects as a TCP ECU and shows them live with no libdlt and no dlt-daemon. Wire
+    format verified against DLT Viewer's `qdlt` parser (synthetic + a real on-device
+    streamed message); server verified live on the AVD.
   - ⏳ Second attach point for `BR_FAILED_REPLY`/`BR_DEAD_REPLY` (toggleable).
   - ⏳ Full CLI (interface filter, `--include-replies`, error toggle).
 
