@@ -57,7 +57,20 @@ same Qt major version and compiler ABI as your dlt-viewer. You need the dlt-view
 
 ## Notes
 
+- The CMake links the core's **static** `libbindfetto_decode.a`, so the built plugin
+  embeds the decoder and has no external `bindfetto_decode` dependency. On macOS the
+  Rust runtime pulls in the CoreFoundation/Security frameworks (handled in CMake).
 - `pluginInterfaceVersion()` returns the SDK's `PLUGIN_INTERFACE_VERSION`; the plugin
   must be rebuilt if the dlt-viewer plugin interface version changes.
 - The single `BfDecoder` is immutable after `loadConfig` and only borrowed by
   `decodeMsg`, so it is safe if the viewer decodes on multiple threads.
+
+## Verified
+
+Built and runtime-tested on macOS (arm64) against a source build of dlt-viewer with
+Qt 6.11: the plugin loads via `QPluginLoader`, casts to `QDLTPluginInterface` /
+`QDLTPluginDecoderInterface`, and `decodeMsg` rewrites `interface.[code:N]` to the
+catalog method name (e.g. `android.app.IActivityManager.[code:7]` →
+`android.app.IActivityManager.startActivity`), leaving non-bindfetto messages untouched.
+dlt-viewer runs on macOS but is not *officially* supported there; Linux/Windows use the
+same CMake.

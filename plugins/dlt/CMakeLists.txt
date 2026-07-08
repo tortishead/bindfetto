@@ -20,9 +20,15 @@ find_library(DLT_VIEWER_QDLT_LIB NAMES qdlt
 # --- bindfetto Rust decode core (C ABI) ------------------------------------------
 set(BINDFETTO_DECODE_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../decode/include"
     CACHE PATH "location of bindfetto_decode.h")
+# Prefer the *static* archive so the core is embedded in the plugin (a self-contained
+# .so with no dev-path dylib dependency). Restrict the suffix search to .a.
+set(_bf_saved_suffixes ${CMAKE_FIND_LIBRARY_SUFFIXES})
+set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
 find_library(BINDFETTO_DECODE_LIB NAMES bindfetto_decode
     PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../../decode/target/release"
+    NO_DEFAULT_PATH
     DOC "Rust decode core static library (build with: cargo build --release in decode/)")
+set(CMAKE_FIND_LIBRARY_SUFFIXES ${_bf_saved_suffixes})
 
 if(NOT DLT_VIEWER_QDLT_INCLUDE_DIR OR NOT DLT_VIEWER_QDLT_LIB)
     message(FATAL_ERROR
@@ -49,7 +55,10 @@ target_link_libraries(bindfettodecoderplugin PRIVATE
     ${BINDFETTO_DECODE_LIB}
 )
 
-# The Rust static library pulls in the platform's pthread/dl/m at final link.
-if(UNIX AND NOT APPLE)
+# The Rust static library pulls in platform runtime deps at final link.
+if(APPLE)
+    target_link_libraries(bindfettodecoderplugin PRIVATE
+        "-framework CoreFoundation" "-framework Security")
+elseif(UNIX)
     target_link_libraries(bindfettodecoderplugin PRIVATE pthread dl m)
 endif()
