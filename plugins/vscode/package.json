@@ -5,6 +5,11 @@
   "version": "0.1.0",
   "publisher": "bindfetto",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tortishead/bindfetto.git",
+    "directory": "plugins/vscode"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
