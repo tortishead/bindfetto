@@ -51,7 +51,8 @@ Press F5 in VS Code to launch the Extension Development Host.
 
 ## Status
 
-The wasm module builds and exports the expected symbols. The TypeScript/Node and
-in-editor paths need a modern Node to build (`tsc`) and run; the bundled Node here is
-too old, so those were not executed in-repo yet. `scripts/smoke.mjs` is the quickest
-runtime check once Node is available.
+Verified on macOS with Node 26: the wasm builds and exports the expected symbols,
+`tsc` typechecks clean, `npm run smoke` passes, and the compiled `dist/decoder.js`
+decodes real lines end-to-end through the wasm core (e.g.
+`android.app.ITaskStackListener.[code:12]` → `…onTaskMovedToFront`). The in-editor
+command wiring itself is exercised by launching the Extension Development Host (F5).

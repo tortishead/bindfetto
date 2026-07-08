@@ -17,7 +17,10 @@ export class BindfettoDecoder {
 
   /** Instantiate the wasm module and build a decoder from catalog JSON. */
   static async load(wasmBytes: Uint8Array, catalogJson: string): Promise<BindfettoDecoder> {
-    const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+    // Compile then instantiate the Module (rather than the bytes overload) so the
+    // result type is unambiguously an Instance across TS lib versions.
+    const module = await WebAssembly.compile(wasmBytes as unknown as BufferSource);
+    const instance = await WebAssembly.instantiate(module, {});
     const ex = instance.exports as unknown as WasmExports;
     const handle = withCString(ex, catalogJson, (ptr) => ex.bf_decoder_new(ptr));
     if (handle === 0) {

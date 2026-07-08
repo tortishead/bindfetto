@@ -46,8 +46,8 @@ Vertical slices; each one runs on the AVD before the next starts.
     `decodeMsg` rewrites via the core.
   - ✅ VS Code extension (`plugins/vscode/`, TypeScript over the WASM core): one command
     (**Decode Active Editor**) + `bindfetto.catalogPath` setting; `src/decoder.ts`
-    marshals strings across the wasm boundary. Wasm builds + exports verified; TS/Node
-    build (`tsc`) and in-editor run pending a modern Node.
+    marshals strings across the wasm boundary. Verified on Node 26: wasm builds/exports,
+    `tsc` clean, Node smoke + compiled-decoder end-to-end decode pass.
 
 ## Track C — control app (`app/`, Kotlin)
 
