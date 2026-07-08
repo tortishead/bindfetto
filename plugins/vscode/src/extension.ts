@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 
+import { loadCatalogJson } from "./catalog";
 import { BindfettoDecoder } from "./decoder";
 
 let decoder: BindfettoDecoder | undefined;
@@ -20,7 +21,7 @@ async function getDecoder(context: vscode.ExtensionContext): Promise<BindfettoDe
   }
   const wasmPath = path.join(context.extensionPath, "media", "bindfetto_decode_wasm.wasm");
   const wasmBytes = fs.readFileSync(wasmPath);
-  const catalogJson = fs.readFileSync(catalogPath, "utf8");
+  const catalogJson = loadCatalogJson(catalogPath);
   decoder = await BindfettoDecoder.load(wasmBytes, catalogJson);
   return decoder;
 }

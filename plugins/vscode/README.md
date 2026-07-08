@@ -45,7 +45,8 @@ Press F5 in VS Code to launch the Extension Development Host.
 
 ## Use
 
-1. Set `bindfetto.catalogPath` to your AIDL catalog JSON (Track B1 output).
+1. Set `bindfetto.catalogPath` to your AIDL catalog JSON (Track B1 output), or to a
+   **folder** of catalogs — every `*.json` under it is merged into one catalog.
 2. Open a bindfetto log (or paste `adb logcat -s bindfetto` output).
 3. Run **Bindfetto: Decode Active Editor** — a decoded copy opens beside it.
 

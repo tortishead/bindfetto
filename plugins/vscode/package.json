@@ -29,7 +29,7 @@
         "bindfetto.catalogPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the AIDL catalog JSON used to resolve transaction codes to method names."
+          "description": "Path to an AIDL catalog JSON file, or a folder — in which case every *.json under it (recursively) is merged into one catalog. Used to resolve transaction codes to method names."
         }
       }
     }
