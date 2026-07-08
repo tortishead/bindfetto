@@ -1,0 +1,6 @@
+{
+    "name": "Bindfetto Decoder Plugin",
+    "vendor": "bindfetto",
+    "description": "Resolves bindfetto Binder transaction codes to AIDL method names.",
+    "version": "0.1.0"
+}

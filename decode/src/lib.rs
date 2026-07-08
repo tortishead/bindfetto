@@ -24,6 +24,7 @@
 //! because it substitutes the token in place and leaves the rest untouched.
 
 mod catalog;
+pub mod ffi;
 mod parse;
 
 pub use catalog::{special_transaction, Catalog};

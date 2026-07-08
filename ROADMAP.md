@@ -36,9 +36,14 @@ Vertical slices; each one runs on the AVD before the next starts.
   - ✅ Core crate: `Catalog`/`Decoder`, prefix-agnostic `decode_line` rewrite,
     structured `Record`/`Label` parse, special-transaction table, unit tests.
   - ✅ `bindfetto-decode` stdin→stdout / file CLI.
-  - ⏳ C ABI (cbindgen) for the DLT plugin; WASM (wasm-bindgen) for VS Code.
-- **B3 — viewer plugins**: VS Code first (WASM over the core), DLT Viewer (C++/Qt
-  `QDltPluginDecoderInterface` over the C ABI) for the automotive audience.
+  - ✅ C ABI (`decode/src/ffi.rs` + `decode/include/bindfetto_decode.h`,
+    staticlib/cdylib crate types) for native embedders; verified with a C smoke test.
+  - ⏳ WASM (wasm-bindgen) for VS Code.
+- **B3 — viewer plugins**:
+  - ✅ DLT Viewer plugin (`plugins/dlt/`, C++/Qt `QDLTPluginDecoderInterface` over the
+    C ABI): `isMsg` matches the `BINDFETTO` marker, `decodeMsg` rewrites via the core,
+    catalog loaded through `loadConfig`. Needs building against a dlt-viewer SDK.
+  - ⏳ VS Code extension (WASM over the core).
 
 ## Track C — control app (`app/`, Kotlin)
 
