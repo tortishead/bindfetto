@@ -15,6 +15,7 @@ target/
 
 # Build output
 /build/
+build/
 /out/
 *.o
 *.so
