@@ -26,6 +26,7 @@ mod dlt_wire;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{BufWriter, Write as _};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
@@ -65,10 +66,44 @@ impl Sink {
     }
 
     fn parse(args: &[String]) -> Self {
-        match arg_value(args, "--sink") {
-            Some("logcat") => Sink::Logcat,
-            Some("both") => Sink::Both,
-            Some("none") => Sink::None,
+        Sink::from_name(arg_value(args, "--sink").unwrap_or("console")).unwrap_or(Sink::Console)
+    }
+
+    /// Parse a sink name (`console|logcat|both|none`).
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "console" => Some(Sink::Console),
+            "logcat" => Some(Sink::Logcat),
+            "both" => Some(Sink::Both),
+            "none" => Some(Sink::None),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Sink::Console => "console",
+            Sink::Logcat => "logcat",
+            Sink::Both => "both",
+            Sink::None => "none",
+        }
+    }
+
+    /// Stable encoding for the lock-free `AtomicU8` in [`RuntimeState`].
+    fn as_u8(self) -> u8 {
+        match self {
+            Sink::Console => 0,
+            Sink::Logcat => 1,
+            Sink::Both => 2,
+            Sink::None => 3,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Sink::Logcat,
+            2 => Sink::Both,
+            3 => Sink::None,
             _ => Sink::Console,
         }
     }
@@ -229,47 +264,77 @@ impl FilterCtl {
     }
 }
 
+/// Shared, live-tunable runtime state: read by the emitter/drain loop on the hot path
+/// and mutated by the control channel. The scalar toggles are lock-free atomics; only
+/// the observed-interface set and the filter maps need a mutex.
+struct RuntimeState {
+    /// Master capture toggle (`START`/`STOP`): when off, drained events are dropped.
+    capturing: AtomicBool,
+    /// Interface discovery (`TRACK`): when off (the default) the emitter does not record
+    /// observed interfaces, so there's no discovery overhead until the app asks for it.
+    discovering: AtomicBool,
+    /// Active text sink, encoded via [`Sink::as_u8`] (`SINK`).
+    sink: AtomicU8,
+    /// Whether transactions are streamed to the DLT server (`DLT on|off`). The server is
+    /// bound once at startup; this only gates the fan-out.
+    dlt_on: AtomicBool,
+    /// The DLT server's port (0 if no server was bound); reported by `STATUS`.
+    dlt_port: u16,
+    /// Total transactions drained from the ring buffer.
+    captured: AtomicU64,
+    /// Transactions that passed the capture gate (were emitted/processed).
+    emitted: AtomicU64,
+    /// Every interface descriptor seen while discovering; feeds `LIST`.
+    observed: Mutex<BTreeSet<String>>,
+    /// The in-kernel interface filter (`LIST`/`GET`/`SET`/`CLEAR`).
+    filter: Mutex<FilterCtl>,
+}
+
 /// Control channel: a line-oriented TCP server the control app connects to (via
 /// `adb forward` in dev, or localhost on-device). Commands, one per line:
 ///
-/// * `LIST`  -> every interface descriptor seen so far, one per line, then `END`.
-/// * `GET`   -> the interfaces in the active filter, one per line, then `END`.
-/// * `SET a,b,c` -> replace the in-kernel filter with these interfaces; reply `OK <n>`.
+/// * `STATUS` -> `key=value` lines (capturing/discovering/sink/dlt/dlt_port/filter/
+///   captured/emitted), then `END`.
+/// * `START` / `STOP` -> toggle capture; reply `OK`.
+/// * `SINK console|logcat|both|none` -> switch the text sink; reply `OK`/`ERR`.
+/// * `DLT on|off` -> toggle DLT streaming; reply `OK`.
+/// * `TRACK on|off` -> toggle interface discovery; reply `OK`.
+/// * `LIST` -> every interface descriptor seen so far, one per line, then `END`.
+/// * `GET`  -> the interfaces in the active filter, one per line, then `END`.
+/// * `SET a,b,c` -> replace the in-kernel filter; reply `OK <n>`.
 /// * `CLEAR` -> disable filtering; reply `OK 0`.
-///
-/// Discovery (`LIST`) feeds the app's selectable list; `SET` pushes the selection into
-/// the in-kernel filter live.
 mod control {
-    use std::collections::BTreeSet;
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{TcpListener, TcpStream};
 
-    use super::FilterCtl;
-
-    /// State shared with the control server: the observed-interface set (written by the
-    /// emitter) and the runtime filter control.
-    pub struct Shared {
-        pub observed: Arc<Mutex<BTreeSet<String>>>,
-        pub filter: Arc<Mutex<FilterCtl>>,
-    }
+    use super::{RuntimeState, Sink};
 
     /// Bind the control port and spawn the accept loop.
-    pub async fn serve(port: u16, shared: Arc<Shared>) -> std::io::Result<()> {
+    pub async fn serve(port: u16, state: Arc<RuntimeState>) -> std::io::Result<()> {
         let listener = TcpListener::bind(("0.0.0.0", port)).await?;
         tokio::spawn(async move {
             while let Ok((sock, _addr)) = listener.accept().await {
-                let shared = shared.clone();
+                let state = state.clone();
                 tokio::spawn(async move {
-                    let _ = handle(sock, shared).await;
+                    let _ = handle(sock, state).await;
                 });
             }
         });
         Ok(())
     }
 
-    async fn handle(sock: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
+    fn on_off(rest: &str) -> Option<bool> {
+        match rest.to_ascii_lowercase().as_str() {
+            "on" | "1" | "true" => Some(true),
+            "off" | "0" | "false" => Some(false),
+            _ => None,
+        }
+    }
+
+    async fn handle(sock: TcpStream, state: Arc<RuntimeState>) -> std::io::Result<()> {
         let (read, mut write) = sock.into_split();
         let mut lines = BufReader::new(read).lines();
         while let Some(line) = lines.next_line().await? {
@@ -279,9 +344,60 @@ mod control {
                 None => (line, ""),
             };
             match cmd.to_ascii_uppercase().as_str() {
+                "STATUS" => {
+                    let onoff = |b: bool| if b { "on" } else { "off" };
+                    let sink = Sink::from_u8(state.sink.load(Ordering::Relaxed));
+                    let filter_n = state.filter.lock().unwrap().active.len();
+                    let body = format!(
+                        "capturing={}\ndiscovering={}\nsink={}\ndlt={}\ndlt_port={}\n\
+                         filter={}\ncaptured={}\nemitted={}\nEND\n",
+                        onoff(state.capturing.load(Ordering::Relaxed)),
+                        onoff(state.discovering.load(Ordering::Relaxed)),
+                        sink.name(),
+                        onoff(state.dlt_on.load(Ordering::Relaxed)),
+                        state.dlt_port,
+                        filter_n,
+                        state.captured.load(Ordering::Relaxed),
+                        state.emitted.load(Ordering::Relaxed),
+                    );
+                    write.write_all(body.as_bytes()).await?;
+                }
+                "START" => {
+                    state.capturing.store(true, Ordering::Relaxed);
+                    write.write_all(b"OK\n").await?;
+                }
+                "STOP" => {
+                    state.capturing.store(false, Ordering::Relaxed);
+                    write.write_all(b"OK\n").await?;
+                }
+                "SINK" => match Sink::from_name(&rest.to_ascii_lowercase()) {
+                    Some(s) => {
+                        state.sink.store(s.as_u8(), Ordering::Relaxed);
+                        write.write_all(b"OK\n").await?;
+                    }
+                    None => {
+                        write
+                            .write_all(b"ERR sink must be console|logcat|both|none\n")
+                            .await?;
+                    }
+                },
+                "DLT" => match on_off(rest) {
+                    Some(on) => {
+                        state.dlt_on.store(on, Ordering::Relaxed);
+                        write.write_all(b"OK\n").await?;
+                    }
+                    None => write.write_all(b"ERR DLT needs on|off\n").await?,
+                },
+                "TRACK" => match on_off(rest) {
+                    Some(on) => {
+                        state.discovering.store(on, Ordering::Relaxed);
+                        write.write_all(b"OK\n").await?;
+                    }
+                    None => write.write_all(b"ERR TRACK needs on|off\n").await?,
+                },
                 "LIST" => {
                     let items: Vec<String> =
-                        shared.observed.lock().unwrap().iter().cloned().collect();
+                        state.observed.lock().unwrap().iter().cloned().collect();
                     for it in items {
                         write.write_all(it.as_bytes()).await?;
                         write.write_all(b"\n").await?;
@@ -289,7 +405,7 @@ mod control {
                     write.write_all(b"END\n").await?;
                 }
                 "GET" => {
-                    let items = shared.filter.lock().unwrap().active.clone();
+                    let items = state.filter.lock().unwrap().active.clone();
                     for it in items {
                         write.write_all(it.as_bytes()).await?;
                         write.write_all(b"\n").await?;
@@ -304,14 +420,14 @@ mod control {
                         .map(str::to_owned)
                         .collect();
                     let n = names.len();
-                    let res = shared.filter.lock().unwrap().apply(&names);
+                    let res = state.filter.lock().unwrap().apply(&names);
                     match res {
                         Ok(()) => write.write_all(format!("OK {n}\n").as_bytes()).await?,
                         Err(e) => write.write_all(format!("ERR {e}\n").as_bytes()).await?,
                     }
                 }
                 "CLEAR" => {
-                    let res = shared.filter.lock().unwrap().apply(&[]);
+                    let res = state.filter.lock().unwrap().apply(&[]);
                     match res {
                         Ok(()) => write.write_all(b"OK 0\n").await?,
                         Err(e) => write.write_all(format!("ERR {e}\n").as_bytes()).await?,
@@ -357,29 +473,36 @@ async fn main() -> anyhow::Result<()> {
         )),
         None => None,
     };
-    let dlt = match args.iter().position(|a| a == "--dlt-serve") {
-        Some(i) => {
-            let port = args
-                .get(i + 1)
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(3490);
-            let server = dlt::DltServer::bind(port)
-                .await
-                .with_context(|| format!("bind DLT server on port {port}"))?;
-            println!("bindfetto: DLT server on 0.0.0.0:{port} — connect DLT Viewer as a TCP ECU");
-            Some(DltState::new(server))
-        }
-        None => None,
-    };
-
-    // In-kernel interface filter (M4): own the two BPF maps so the filter can be set at
-    // startup (`--iface`) and reconfigured live over the control channel. Non-matching
-    // transactions are dropped in the probe before they ever reach the ring buffer.
+    // The control channel drives the runtime live (Track C). Its presence changes a few
+    // startup defaults: it auto-binds a DLT server (so the app's DLT toggle is real) and
+    // enables the observed-interface set for discovery.
     let control_port = args.iter().position(|a| a == "--control").map(|i| {
         args.get(i + 1)
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(3491)
     });
+
+    // Bind a DLT server if the user asked (`--dlt-serve`) or if the control channel is on
+    // (so `DLT on` has a server to stream to). Explicit `--dlt-serve` also turns streaming
+    // on immediately; under `--control` alone it stays off until the app enables it.
+    let dlt_explicit = args.iter().position(|a| a == "--dlt-serve");
+    let dlt_port = dlt_explicit
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(3490);
+    let dlt = if dlt_explicit.is_some() || control_port.is_some() {
+        let server = dlt::DltServer::bind(dlt_port)
+            .await
+            .with_context(|| format!("bind DLT server on port {dlt_port}"))?;
+        println!("bindfetto: DLT server on 0.0.0.0:{dlt_port} — connect DLT Viewer as a TCP ECU");
+        Some(DltState::new(server))
+    } else {
+        None
+    };
+
+    // In-kernel interface filter (M4): own the two BPF maps so the filter can be set at
+    // startup (`--iface`) and reconfigured live over the control channel. Non-matching
+    // transactions are dropped in the probe before they ever reach the ring buffer.
     let ifaces = iface_filters(&args);
     let mut filter = FilterCtl {
         wanted: BpfHashMap::try_from(ebpf.take_map("WANTED").context("WANTED map missing")?)?,
@@ -397,18 +520,28 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Control channel (Track C): serve the observed-interface list and accept live filter
-    // updates. Only when `--control` is given do we track observed interfaces.
-    let observed = control_port.map(|_| Arc::new(Mutex::new(BTreeSet::<String>::new())));
+    // Shared runtime state: capture on by default, discovery off (only tracked when the
+    // app asks), sink from `--sink`, DLT streaming on iff `--dlt-serve` was explicit.
+    let state = Arc::new(RuntimeState {
+        capturing: AtomicBool::new(true),
+        discovering: AtomicBool::new(false),
+        sink: AtomicU8::new(sink.as_u8()),
+        dlt_on: AtomicBool::new(dlt_explicit.is_some()),
+        dlt_port: if dlt.is_some() { dlt_port } else { 0 },
+        captured: AtomicU64::new(0),
+        emitted: AtomicU64::new(0),
+        observed: Mutex::new(BTreeSet::new()),
+        filter: Mutex::new(filter),
+    });
+
     if let Some(port) = control_port {
-        let shared = Arc::new(control::Shared {
-            observed: observed.clone().unwrap(),
-            filter: Arc::new(Mutex::new(filter)),
-        });
-        control::serve(port, shared)
+        control::serve(port, state.clone())
             .await
             .with_context(|| format!("bind control server on port {port}"))?;
-        println!("bindfetto: control channel on 0.0.0.0:{port} (LIST/GET/SET/CLEAR)");
+        println!(
+            "bindfetto: control channel on 0.0.0.0:{port} \
+             (STATUS/START/STOP/SINK/DLT/TRACK/LIST/GET/SET/CLEAR)"
+        );
     }
 
     let ring = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS map missing")?)?;
@@ -416,7 +549,7 @@ async fn main() -> anyhow::Result<()> {
     let mut names = NameCache::default();
     // Kernel events carry CLOCK_MONOTONIC ns; this offset maps them to wall-clock.
     let boot_offset_ns = monotonic_to_realtime_offset_ns();
-    let mut emitter = Emitter::new(sink, boot_offset_ns, jsonl, dlt, observed);
+    let mut emitter = Emitter::new(state, boot_offset_ns, jsonl, dlt);
 
     println!("bindfetto: capturing binder transactions (Ctrl-C to stop)");
 
@@ -460,13 +593,12 @@ impl DltState {
 }
 
 struct Emitter {
-    sink: Sink,
+    /// Live-tunable runtime state (sink, capture/discovery toggles, DLT gate, counts).
+    state: Arc<RuntimeState>,
     boot_offset_ns: i128,
     jsonl: Option<BufWriter<fs::File>>,
     dlt: Option<DltState>,
-    /// Shared set of every interface descriptor seen, for the control channel's `LIST`.
-    observed: Option<Arc<Mutex<BTreeSet<String>>>>,
-    /// Interfaces already published to `observed`, to skip the shared lock on repeats.
+    /// Interfaces already published to `state.observed`, to skip the shared lock on repeats.
     seen: HashSet<String>,
     core: String,
     scratch: String,
@@ -475,18 +607,16 @@ struct Emitter {
 
 impl Emitter {
     fn new(
-        sink: Sink,
+        state: Arc<RuntimeState>,
         boot_offset_ns: i128,
         jsonl: Option<BufWriter<fs::File>>,
         dlt: Option<DltState>,
-        observed: Option<Arc<Mutex<BTreeSet<String>>>>,
     ) -> Self {
         Self {
-            sink,
+            state,
             boot_offset_ns,
             jsonl,
             dlt,
-            observed,
             seen: HashSet::new(),
             core: String::new(),
             scratch: String::new(),
@@ -496,27 +626,34 @@ impl Emitter {
 
     /// Emit one transaction to every configured sink.
     fn emit(&mut self, ev: &TxEvent, names: &mut NameCache) {
-        // Record the interface for control-channel discovery. Only the first sighting of
-        // each descriptor takes the shared lock; repeats hit the local `seen` set.
-        if self.observed.is_some() {
+        self.state.captured.fetch_add(1, Ordering::Relaxed);
+        // Master capture gate (`STOP`): drop drained events without emitting.
+        if !self.state.capturing.load(Ordering::Relaxed) {
+            return;
+        }
+        self.state.emitted.fetch_add(1, Ordering::Relaxed);
+
+        // Record the interface for control-channel discovery, but only while discovery is
+        // on (default off). First sighting of each descriptor takes the shared lock;
+        // repeats hit the local `seen` set.
+        if self.state.discovering.load(Ordering::Relaxed) {
             self.scratch.clear();
             if write_iface(&mut self.scratch, ev) && self.seen.insert(self.scratch.clone()) {
-                if let Some(obs) = &self.observed {
-                    obs.lock().unwrap().insert(self.scratch.clone());
-                }
+                self.state.observed.lock().unwrap().insert(self.scratch.clone());
             }
         }
 
         self.core.clear();
         format_core(&mut self.core, ev, names);
-        if self.sink.console() {
+        let sink = Sink::from_u8(self.state.sink.load(Ordering::Relaxed));
+        if sink.console() {
             self.scratch.clear();
             write_timestamp(&mut self.scratch, ev.ts_ns, self.boot_offset_ns);
             self.scratch.push(' ');
             self.scratch.push_str(&self.core);
             println!("{}", self.scratch);
         }
-        if self.sink.logcat() {
+        if sink.logcat() {
             // Logcat records its own timestamp, so the message carries only the marker
             // and the core line. (liblog's C API copies the string, so one alloc here
             // is unavoidable.)
@@ -526,7 +663,7 @@ impl Emitter {
             self.scratch.push_str(&self.core);
             logcat::write(LOG_TAG, &self.scratch);
         }
-        if self.dlt.is_some() {
+        if self.dlt.is_some() && self.state.dlt_on.load(Ordering::Relaxed) {
             // Carry the marker + core line (same content as logcat) as a verbose DLT
             // message. DLT stamps reception time; we pass the kernel monotonic time as
             // the message timestamp (0.1 ms units).

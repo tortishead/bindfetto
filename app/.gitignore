@@ -2,6 +2,8 @@
 .gradle/
 build/
 local.properties
+# Bundled runtime binary (copied from runtime/ build output by bundleRuntimeBinary)
+app/src/main/jniLibs/
 *.apk
 .idea/
 captures/

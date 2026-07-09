@@ -81,7 +81,7 @@ offline against the AIDL catalog — a later milestone.
 | `--jsonl <path>` | Also write one JSON object per transaction to `<path>`. Composes with any sink. |
 | `--dlt-serve [port]` | Be a DLT TCP server (default 3490); DLT Viewer connects as a TCP ECU for live trace. |
 | `--iface <name>` | **In-kernel** interface filter: keep only these descriptors, dropping the rest in the probe before the ring buffer. Repeatable and comma-separated (`--iface a.b.IFoo --iface a.c.IBar,a.c.IBaz`). Match is exact (full descriptor), so `IVehicle` does not match `IVehicleCallback`. While a filter is active, transactions with no interface token (replies already excluded, special/native transactions) also drop. |
-| `--control [port]` | Control channel for the Track C app (default 3491): a line TCP server exposing `LIST` (interfaces seen), `GET` (active filter), `SET a,b,c` (replace the in-kernel filter live), `CLEAR`. Composes with any sink. |
+| `--control [port]` | Control channel for the Track C app (default 3491): a line TCP server driving the runtime live. Commands: `STATUS`; `START`/`STOP` (capture toggle); `SINK console\|logcat\|both\|none`; `DLT on\|off`; `TRACK on\|off` (interface discovery, off by default); `LIST` (interfaces seen while discovering); `GET`/`SET a,b,c`/`CLEAR` (in-kernel filter). Enabling `--control` also auto-binds the DLT server (see `--dlt-serve`) so `DLT on` has an endpoint. |
 
 ```sh
 # Keep only PowerManager + ActivityManager traffic, stream to DLT Viewer, no console

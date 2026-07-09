@@ -69,15 +69,20 @@ Vertical slices; each one runs on the AVD before the next starts.
 ## Track C — control app (`app/`, Kotlin)
 
 - **C1 — control channel.** ✅ `--control [port]` (default 3491): a line-oriented TCP
-  server with `LIST` (interfaces observed so far), `GET` (active filter), `SET a,b,c`
-  (replace the in-kernel filter), and `CLEAR`. `SET`/`CLEAR` mutate the `WANTED`/
-  `FILTER_ON` maps live. (TCP over localhost / `adb forward` was chosen over the SPEC's
-  unix-socket + `SO_PEERCRED` design for testability; the socket hardening is deferred.)
-- **C2 — app.** ✅ (discovery + filter) Kotlin + Jetpack Compose app under `app/`:
-  connects to the control channel, shows observed interfaces as a checkbox list
-  (`ControlClient.kt`), and pushes the selection as the in-kernel filter. Verified
-  end-to-end on the AVD (Refresh → list, Apply → capture narrows in-kernel, Clear →
-  firehose returns). Still TODO: deploy binary (signature permission / adb fallback),
-  start/stop lifecycle, error toggle.
+  server driving the runtime live via a shared `RuntimeState`. Commands: `STATUS`;
+  `START`/`STOP` (capture toggle); `SINK`; `DLT on|off`; `TRACK on|off` (interface
+  discovery, off by default); `LIST`/`GET`/`SET`/`CLEAR` (in-kernel filter). Enabling
+  `--control` auto-binds the DLT server. (TCP over localhost / `adb forward` was chosen
+  over the SPEC's unix-socket + `SO_PEERCRED` design for testability; hardening deferred.)
+- **C2 — app.** ✅ Kotlin + Jetpack Compose app under `app/`, three tabs:
+  - **Control** — Connect + live STATUS, Start/Stop, sink selector, DLT toggle.
+  - **Filter** — discovery enabled only while the tab is open, checkbox list, Apply/Clear
+    push the in-kernel filter.
+  - **Deploy** — best-effort deploy of the bundled binary via `su`, with an `adb` fallback.
+
+  Verified end-to-end on the AVD (headless via `uiautomator dump` + `input tap`): every
+  Control action round-trips through STATUS; discovery toggles with the Filter tab; Apply
+  narrows the in-kernel capture; Deploy falls back to adb (no root/signature on a debug
+  build). Still TODO: error-capture toggle (needs M5); verified privileged deploy.
 
 Tracks B and C start once Track A produces stable output (≈after M3).

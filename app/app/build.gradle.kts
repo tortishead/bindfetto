@@ -32,7 +32,26 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // Extract jniLibs to nativeLibraryDir at install so the bundled bindfetto binary is a
+    // real, executable file on disk (needed for the Deploy tab's launch attempt).
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
+
+// Bundle the cross-compiled runtime binary as an executable native lib. jniLibs is the one
+// app location Android will place with exec permission. Skipped (with the Deploy tab
+// showing its adb fallback) if the runtime hasn't been built yet.
+val bundleRuntimeBinary by tasks.registering(Copy::class) {
+    val src = rootProject.file("../runtime/target/aarch64-linux-android/release/bindfetto")
+    onlyIf { src.exists() }
+    from(src) { rename { "libbindfetto.so" } }
+    into(layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a"))
+}
+tasks.named("preBuild") { dependsOn(bundleRuntimeBinary) }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")

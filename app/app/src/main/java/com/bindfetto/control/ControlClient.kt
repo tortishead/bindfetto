@@ -13,6 +13,11 @@ import java.net.Socket
  *
  * The protocol is line-oriented text (see `runtime/bindfetto/src/main.rs`):
  *
+ *  * `STATUS`      -> `key=value` lines, then `END`.
+ *  * `START`/`STOP` -> toggle capture; reply `OK`.
+ *  * `SINK <mode>` -> switch text sink; reply `OK`/`ERR`.
+ *  * `DLT on|off`  -> toggle DLT streaming; reply `OK`.
+ *  * `TRACK on|off`-> toggle interface discovery; reply `OK`.
  *  * `LIST`        -> every interface descriptor seen so far, one per line, then `END`.
  *  * `GET`         -> the interfaces in the active filter, one per line, then `END`.
  *  * `SET a,b,c`   -> replace the in-kernel filter; reply `OK <n>` or `ERR <msg>`.
@@ -22,6 +27,33 @@ import java.net.Socket
  * so a short-lived connection is simpler than holding one open and reconnecting.
  */
 class ControlClient(private val host: String, private val port: Int) {
+
+    /** Runtime status (`STATUS`) as key=value pairs. */
+    suspend fun status(): Map<String, String> = withContext(Dispatchers.IO) {
+        useSocket { reader, out ->
+            out.write("STATUS\n".toByteArray()); out.flush()
+            val map = LinkedHashMap<String, String>()
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (line == "END") break
+                val eq = line.indexOf('=')
+                if (eq > 0) map[line.substring(0, eq)] = line.substring(eq + 1)
+            }
+            map
+        }
+    }
+
+    /** Toggle capture (`START`/`STOP`). */
+    suspend fun setCapturing(on: Boolean): String = simple(if (on) "START" else "STOP")
+
+    /** Switch the text sink (`SINK console|logcat|both|none`). */
+    suspend fun setSink(mode: String): String = simple("SINK $mode")
+
+    /** Toggle DLT streaming (`DLT on|off`). */
+    suspend fun setDlt(on: Boolean): String = simple("DLT " + if (on) "on" else "off")
+
+    /** Toggle interface discovery (`TRACK on|off`). */
+    suspend fun setTracking(on: Boolean): String = simple("TRACK " + if (on) "on" else "off")
 
     /** Interfaces bindfetto has observed (`LIST`). */
     suspend fun list(): List<String> = readListCommand("LIST")
@@ -38,6 +70,14 @@ class ControlClient(private val host: String, private val port: Int) {
             val line = if (interfaces.isEmpty()) "CLEAR" else "SET " + interfaces.joinToString(",")
             out.write((line + "\n").toByteArray())
             out.flush()
+            reader.readLine()?.trim() ?: "ERR no response"
+        }
+    }
+
+    /** Send a command that replies with a single line (`OK`/`ERR …`). */
+    private suspend fun simple(command: String): String = withContext(Dispatchers.IO) {
+        useSocket { reader, out ->
+            out.write((command + "\n").toByteArray()); out.flush()
             reader.readLine()?.trim() ?: "ERR no response"
         }
     }
