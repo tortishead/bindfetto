@@ -73,4 +73,19 @@ from the parcel (AIDL `'SYST'` token). Replies and HIDL/hwbinder transactions ar
 labeled `<reply>` / `<non-aidl>`. The method name (from `[code:N]`) is resolved
 offline against the AIDL catalog — a later milestone.
 
+## Options
+
+| Flag | Effect |
+|---|---|
+| `--sink console\|logcat\|both\|none` | Human-readable line sink (default `console`; `none` = quiet, file/DLT only). |
+| `--jsonl <path>` | Also write one JSON object per transaction to `<path>`. Composes with any sink. |
+| `--dlt-serve [port]` | Be a DLT TCP server (default 3490); DLT Viewer connects as a TCP ECU for live trace. |
+| `--iface <name>` | **In-kernel** interface filter: keep only these descriptors, dropping the rest in the probe before the ring buffer. Repeatable and comma-separated (`--iface a.b.IFoo --iface a.c.IBar,a.c.IBaz`). Match is exact (full descriptor), so `IVehicle` does not match `IVehicleCallback`. While a filter is active, transactions with no interface token (replies already excluded, special/native transactions) also drop. |
+
+```sh
+# Keep only PowerManager + ActivityManager traffic, stream to DLT Viewer, no console
+adb shell /data/local/tmp/bindfetto --sink none --dlt-serve \
+  --iface android.os.IPowerManager,android.app.IActivityManager
+```
+
 See the repo-root `ROADMAP.md` for the milestone sequence.

@@ -17,8 +17,13 @@ Vertical slices; each one runs on the AVD before the next starts.
   UTF-16-decodes the interface descriptor (validated by the `'SYST'` token magic).
   Replies show `<reply>`, HIDL/hwbinder & special transactions show `<non-aidl>`.
   Verified live on the AVD (automotive AIDL + a HIDL bluetooth call).
-- **M4 — in-kernel filter.** Hash descriptor bytes in the probe; match against a
-  BPF map of wanted hashes to drop before the ring buffer.
+- **M4 — in-kernel filter.** ✅ The probe uses the full zero-padded UTF-16LE descriptor
+  as the key into a `WANTED` BPF map (collision-free, so no in-probe hashing), gated by a
+  1-element `FILTER_ON` flag map (runtime-toggleable for the control app). Non-matching
+  transactions are dropped in the tracepoint **before** the ring buffer. Driven by
+  `--iface <name>` (repeatable, comma-separated). Verified live on the AVD: exact match
+  (filtering `IVehicle` does not leak `IVehicleCallback`); tokenless/special transactions
+  drop while a filter is active.
 - **M5 — errors + sinks + CLI.** In progress.
   - ✅ Console sink with wall-clock timestamp.
   - ✅ Logcat sink (`--sink console|logcat|both|none`), tag `bindfetto` + `BINDFETTO` marker.
@@ -30,7 +35,8 @@ Vertical slices; each one runs on the AVD before the next starts.
     format verified against DLT Viewer's `qdlt` parser (synthetic + a real on-device
     streamed message); server verified live on the AVD.
   - ⏳ Second attach point for `BR_FAILED_REPLY`/`BR_DEAD_REPLY` (toggleable).
-  - ⏳ Full CLI (interface filter, `--include-replies`, error toggle).
+  - ✅ Interface filter CLI (`--iface`) — wired to the M4 in-kernel filter above.
+  - ⏳ Full CLI (`--include-replies`, error toggle).
 
 ## Track B — offline decode
 

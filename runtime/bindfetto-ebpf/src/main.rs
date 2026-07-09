@@ -18,10 +18,10 @@ use aya_ebpf::{
         bpf_probe_read_user_buf,
     },
     macros::{kprobe, map, tracepoint},
-    maps::{HashMap, RingBuf},
+    maps::{Array, HashMap, RingBuf},
     programs::{ProbeContext, TracePointContext},
 };
-use bindfetto_common::{TxEvent, IFACE_HEADER_MAGIC, MAX_IFACE_BYTES};
+use bindfetto_common::{IfaceKey, TxEvent, IFACE_HEADER_MAGIC, MAX_IFACE_BYTES};
 
 /// Ring buffer to userspace.
 #[map]
@@ -31,11 +31,26 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 #[map]
 static STASH: HashMap<u64, Stash> = HashMap::with_max_entries(10240, 0);
 
+/// In-kernel interface filter: descriptors the operator asked to keep. Populated from
+/// userspace (`--iface`). When [`FILTER_ON`] is set, a transaction is dropped **before**
+/// the ring buffer unless its captured descriptor is a key here — cutting the probe's
+/// output volume and observer effect on the traced device.
+#[map]
+static WANTED: HashMap<IfaceKey, u8> = HashMap::with_max_entries(256, 0);
+
+/// One-element enable flag for the interface filter (element 0: 0 = off, non-0 = on).
+/// A map (not a load-time const) so the control app can toggle filtering at runtime.
+#[map]
+static FILTER_ON: Array<u32> = Array::with_max_entries(1, 0);
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Stash {
     data_size: u32,
     iface_byte_len: u32,
+    /// 1 = emit this transaction, 0 = drop it (interface filter decided in the kprobe,
+    /// where the descriptor is available; the tracepoint enforces it).
+    keep: u32,
     iface: [u8; MAX_IFACE_BYTES],
 }
 
@@ -85,6 +100,7 @@ fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
     let mut stash = Stash {
         data_size,
         iface_byte_len: 0,
+        keep: 1,
         iface: [0u8; MAX_IFACE_BYTES],
     };
 
@@ -118,6 +134,18 @@ fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
                 stash.iface_byte_len = nbytes as u32;
             }
         }
+    }
+
+    // Interface filter (M4): when enabled, keep only transactions whose captured
+    // descriptor is in WANTED. The full descriptor is the map key, so no hashing is
+    // needed on the hot path. Tokenless / unreadable transactions have an all-zero
+    // key that userspace never inserts, so they drop while filtering is on.
+    if FILTER_ON.get(0).copied().unwrap_or(0) != 0 {
+        // Reinterpret the captured bytes as the key in place — IfaceKey is
+        // repr(transparent) over [u8; MAX_IFACE_BYTES], so this avoids a second
+        // 256-byte copy that would blow the 512-byte BPF stack.
+        let key = unsafe { &*(stash.iface.as_ptr() as *const IfaceKey) };
+        stash.keep = unsafe { WANTED.get(key).is_some() } as u32;
     }
 
     let pid_tgid = bpf_get_current_pid_tgid();
@@ -163,12 +191,20 @@ fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
         iface_byte_len: 0,
         iface: [0u8; MAX_IFACE_BYTES],
     };
+    // Default keep when there's no stash (kprobe didn't run/insert): drop iff filtering
+    // is active, since we then have no descriptor to match against a wanted interface.
+    let mut keep = FILTER_ON.get(0).copied().unwrap_or(0) == 0;
     if let Some(stash) = unsafe { STASH.get(&pid_tgid) } {
         ev.data_size = stash.data_size;
         ev.iface_byte_len = stash.iface_byte_len;
         ev.iface = stash.iface;
+        keep = stash.keep != 0;
     }
     let _ = STASH.remove(&pid_tgid);
+
+    if !keep {
+        return Ok(());
+    }
 
     if let Some(mut entry) = EVENTS.reserve::<TxEvent>(0) {
         entry.write(ev);

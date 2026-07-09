@@ -18,6 +18,16 @@ pub const MAX_IFACE_BYTES: usize = 256;
 /// marks a transaction that begins with an interface descriptor.
 pub const IFACE_HEADER_MAGIC: u32 = 0x5359_5354;
 
+/// Key for the in-kernel interface filter map (`WANTED`): a zero-padded UTF-16LE
+/// interface descriptor, byte-identical to the bytes the probe captures into
+/// [`TxEvent::iface`]. Using the full descriptor as the key is collision-free, so the
+/// probe needs no hashing on the hot path — it just looks the captured bytes up
+/// directly. The userspace side builds the same key by UTF-16LE-encoding the wanted
+/// interface name and zero-padding to [`MAX_IFACE_BYTES`].
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct IfaceKey(pub [u8; MAX_IFACE_BYTES]);
+
 /// One captured Binder transaction.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -55,3 +65,6 @@ impl TxEvent {
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for TxEvent {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for IfaceKey {}

@@ -30,11 +30,11 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use aya::{
-    maps::RingBuf,
+    maps::{Array, HashMap as BpfHashMap, RingBuf},
     programs::{KProbe, TracePoint},
     Ebpf,
 };
-use bindfetto_common::TxEvent;
+use bindfetto_common::{IfaceKey, TxEvent, MAX_IFACE_BYTES};
 use tokio::io::unix::AsyncFd;
 
 // eBPF object built by build.rs (aya-build).
@@ -80,6 +80,48 @@ fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
+}
+
+/// All interface names requested via `--iface`. Repeatable and comma-separated
+/// (`--iface a.b.IFoo --iface a.c.IBar,a.c.IBaz`); blanks are ignored.
+fn iface_filters(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--iface" {
+            if let Some(v) = args.get(i + 1) {
+                out.extend(
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_owned),
+                );
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Build the in-kernel filter key for an interface name: its UTF-16LE bytes,
+/// zero-padded to [`MAX_IFACE_BYTES`] — byte-identical to what the probe captures
+/// into `TxEvent::iface`, so a direct map lookup matches. Names longer than the
+/// buffer are truncated (the probe truncates the same way).
+fn iface_key(name: &str) -> IfaceKey {
+    let mut key = [0u8; MAX_IFACE_BYTES];
+    let mut i = 0;
+    for unit in name.encode_utf16() {
+        if i + 2 > MAX_IFACE_BYTES {
+            break;
+        }
+        let [lo, hi] = unit.to_le_bytes();
+        key[i] = lo;
+        key[i + 1] = hi;
+        i += 2;
+    }
+    IfaceKey(key)
 }
 
 /// Minimal binding to Android's liblog for the logcat sink.
@@ -200,6 +242,28 @@ async fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
+
+    // In-kernel interface filter (M4): push the wanted descriptors into the BPF map and
+    // flip the enable flag, so non-matching transactions are dropped in the probe before
+    // they ever reach the ring buffer.
+    let ifaces = iface_filters(&args);
+    if !ifaces.is_empty() {
+        let mut wanted: BpfHashMap<_, IfaceKey, u8> =
+            BpfHashMap::try_from(ebpf.map_mut("WANTED").context("WANTED map missing")?)?;
+        for name in &ifaces {
+            wanted
+                .insert(iface_key(name), 1u8, 0)
+                .with_context(|| format!("insert interface filter {name}"))?;
+        }
+        let mut filter_on: Array<_, u32> =
+            Array::try_from(ebpf.map_mut("FILTER_ON").context("FILTER_ON map missing")?)?;
+        filter_on.set(0, 1u32, 0).context("enable interface filter")?;
+        println!(
+            "bindfetto: in-kernel interface filter active — keeping {}: {}",
+            ifaces.len(),
+            ifaces.join(", ")
+        );
+    }
 
     let ring = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS map missing")?)?;
     let mut async_ring = AsyncFd::new(ring)?;
