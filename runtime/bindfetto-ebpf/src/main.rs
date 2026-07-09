@@ -73,7 +73,14 @@ fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
     let tr: usize = ctx.arg(2).ok_or(1i64)?;
 
     let data_size = unsafe { bpf_probe_read_kernel((tr + TR_DATA_SIZE) as *const u64) }? as u32;
-    let buf_ptr = unsafe { bpf_probe_read_kernel((tr + TR_BUFFER_PTR) as *const u64) }? as usize;
+    // data.ptr.buffer is a sender-side userspace pointer. On AArch64 it may carry a tag
+    // in the top byte (TBI is always on; ARM MTE puts a logical tag in bits 59-56).
+    // Strip the top byte before pointer arithmetic + user reads so we don't depend on a
+    // given kernel untagging it for us; user VAs live in TTBR0 low range, so the top
+    // byte is purely tag and this is a no-op on untagged pointers.
+    let buf_ptr =
+        (unsafe { bpf_probe_read_kernel((tr + TR_BUFFER_PTR) as *const u64) }? as usize)
+            & 0x00ff_ffff_ffff_ffff;
 
     let mut stash = Stash {
         data_size,
