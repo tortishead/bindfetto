@@ -12,22 +12,13 @@ as human-readable transaction logs.
 > Viewer, or VS Code — resolves that code to the real method name against a precompiled
 > **AIDL catalog**.
 
-No Perfetto or tracing stack — just a standalone binary. Ideal for automotive
-development and in-car testing.
-
-```text
-com.android.car (11428) -> vehicle@V1-service (11410): android.hardware.automotive.vehicle.IVehicle.startService, 228B
-vehicle@V1-service (11410) -> com.android.car (11428): <reply code:0>, 4B
-system_server (1523) -> media.player (2841): android.media.IMediaPlayer.[code:3] !! BR_DEAD_REPLY (dead node, -3)
-```
-
-The `startService` above is the decoded form of `IVehicle.[code:3]` — resolved offline
-from the catalog.
-
 The bundled Android **control app** drives the on-device daemon live — toggle capture,
 switch sinks, stream to DLT, and pick which interfaces to keep:
 
 <img src='./docs/screenshot-control.png' width='80%' alt='bindfetto control app — Control tab'>
+
+No Perfetto or tracing stack — just a standalone binary. Ideal for **automotive
+development and in-car testing.**
 
 ---
 
