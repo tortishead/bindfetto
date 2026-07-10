@@ -15,6 +15,11 @@ vehicle@V1-service (11410) -> com.android.car (11428): <reply code:0>, 4B
 system_server (1523) -> media.player (2841): android.media.IMediaPlayer.[code:3] !! BR_DEAD_REPLY (dead node, -3)
 ```
 
+The bundled Android **control app** drives the on-device daemon live — toggle capture,
+switch sinks, stream to DLT, and pick which interfaces to keep:
+
+<img src='./docs/screenshot-control.png' width='80%' alt='bindfetto control app — Control tab'>
+
 ---
 
 ## Architecture
