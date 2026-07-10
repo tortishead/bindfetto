@@ -1,6 +1,8 @@
-# BINDFETTO — Live kernel-level Binder IPC tracing for Android
+# BINDFETTO
 
 <img src='./bindfetto.png' width='20%' >
+
+### Live kernel-level Binder IPC tracing for Android
 
 Bindfetto observes Android **Binder** IPC traffic at the kernel level and surfaces it
 as human-readable transaction logs. Instead of guessing at cross-process calls, you
