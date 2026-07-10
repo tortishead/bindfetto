@@ -12,7 +12,8 @@ as human-readable transaction logs.
 > Viewer, or VS Code — resolves that code to the real method name against a precompiled
 > **AIDL catalog**.
 
-No external tooling required — ideal for automotive development and in-car testing.
+No Perfetto or tracing stack — just a standalone binary. Ideal for automotive
+development and in-car testing.
 
 ```text
 com.android.car (11428) -> vehicle@V1-service (11410): android.hardware.automotive.vehicle.IVehicle.startService, 228B
