@@ -1,108 +1,49 @@
 # Roadmap
 
-Design lives in [SPEC.md](./SPEC.md). This is the build order.
+Design lives in [SPEC.md](./SPEC.md); this is the build order. Everything below is
+done and verified live on an arm64 AVD — see the per-component READMEs for detail.
 
 ## Track A — on-device runtime (`runtime/`)
 
-Vertical slices; each one runs on the AVD before the next starts.
-
-- **M1 — bare pipeline.** ✅ **Done.** Attach to `binder:binder_transaction`, push
-  `{src_pid, dst_pid, code, flags, size}` through the ring buffer, print to
-  console. Verified live on an arm64 AVD — captures real binder traffic with
-  correct pids/code/flags and oneway detection.
-- **M2 — process names.** ✅ **Done.** Resolve `/proc/<pid>/cmdline` with a
-  pid→name cache; emit `name (pid) -> name (pid)`.
-- **M3 — interface descriptor + size.** ✅ **Done.** A kprobe on
-  `binder_transaction()` reads `data_size` and the parcel buffer; the consumer
-  UTF-16-decodes the interface descriptor (validated by the `'SYST'` token magic).
-  Replies show `<reply>`, HIDL/hwbinder & special transactions show `<non-aidl>`.
-  Verified live on the AVD (automotive AIDL + a HIDL bluetooth call).
-- **M4 — in-kernel filter.** ✅ The probe uses the full zero-padded UTF-16LE descriptor
-  as the key into a `WANTED` BPF map (collision-free, so no in-probe hashing), gated by a
-  1-element `FILTER_ON` flag map (runtime-toggleable for the control app). Non-matching
-  transactions are dropped in the tracepoint **before** the ring buffer. Driven by
-  `--iface <name>` (repeatable, comma-separated). Verified live on the AVD: exact match
-  (filtering `IVehicle` does not leak `IVehicleCallback`); tokenless/special transactions
-  drop while a filter is active.
-- **M5 — errors + sinks + CLI.** ✅ **Done.**
-  - ✅ Console sink with wall-clock timestamp.
-  - ✅ Logcat sink (`--sink console|logcat|both|none`), tag `bindfetto` + `BINDFETTO` marker.
-  - ✅ File / JSONL sink (`--jsonl <path>`, composes with any `--sink`; one JSON object
-    per transaction). Verified live on the AVD (671 records, all valid JSON).
-  - ✅ DLT server (`--dlt-serve [port]`, default 3490): bindfetto is itself the DLT
-    endpoint — streams each transaction as a verbose DLT message over TCP, so DLT Viewer
-    connects as a TCP ECU and shows them live with no libdlt and no dlt-daemon. Wire
-    format verified against DLT Viewer's `qdlt` parser (synthetic + a real on-device
-    streamed message); server verified live on the AVD.
-  - ✅ Second attach point for `BR_FAILED_REPLY`/`BR_DEAD_REPLY`/`BR_FROZEN_REPLY`: a
-    `binder:binder_return` tracepoint that watches the return `cmd`, gated by the
-    `ERRORS_ON` flag map (off by default). Errors are correlated per-thread to the
-    failing transaction via a `LAST_TX` map, so an error line names the source → target,
-    interface and method: `… ISessionControllerCallback.[code:3] !! BR_DEAD_REPLY`.
-  - ✅ **Concrete failure reason.** The coarse `BR_*` code alone doesn't say *why*
-    (`BR_FAILED_REPLY` collapses buffer-full, security denial, oversized, bad handle…).
-    Each captured transaction carries its `debug_id` (from the tracepoint) through to the
-    error event; the consumer matches it against the kernel's binder
-    `failed_transaction_log` to recover the concrete errno (`return_error_param`) and
-    decodes it: `… !! BR_DEAD_REPLY (dead node, -3)`, `… !! BR_FAILED_REPLY (target
-    buffer full, -28)`. Added to the JSONL as `"errno"`/`"reason"`. Best-effort — that
-    kernel log is a ~32-entry ring shared across all binder failures, so under a failure
-    *storm* an entry can rotate out before we sample it (an accumulating cache softens
-    this); sparse/real failures decode reliably. Verified live on the AVD: real
-    `BR_DEAD_REPLY (dead node, -3)` lines in console + JSONL; the device log also carries
-    `-28` (buffer full), `-22` (invalid transaction) and `0` (frozen), all via the same
-    path.
-  - ✅ Interface filter CLI (`--iface`) — wired to the M4 in-kernel filter above.
-  - ✅ Full CLI: `--errors [on|off]` (also toggled live via the control channel's
-    `ERRORS on|off` and shown in `STATUS`), and `--include-replies` (keeps normal replies
-    that are otherwise dropped before the ring buffer). Both verified live.
+- **M1 — bare pipeline.** ✅ Tracepoint on `binder:binder_transaction` → ring buffer →
+  console (`{src_pid, dst_pid, code, flags, size}`, oneway detection).
+- **M2 — process names.** ✅ pid→name from `/proc/<pid>/cmdline` (cached).
+- **M3 — interface descriptor + size.** ✅ kprobe reads `data_size` + the parcel; the
+  consumer UTF-16-decodes the descriptor. Replies show `<reply>`, HIDL/special
+  transactions `<non-aidl>`.
+- **M4 — in-kernel filter.** ✅ Full zero-padded descriptor as the key into a `WANTED`
+  BPF map, gated by a `FILTER_ON` flag; non-matching transactions drop before the ring
+  buffer. Driven by `--iface` (repeatable, exact match).
+- **M5 — errors + sinks + CLI.** ✅ Sinks: console, logcat (`--sink`), JSONL
+  (`--jsonl`), DLT server (`--dlt-serve`). Error path: a `binder:binder_return`
+  tracepoint (gated by `ERRORS_ON`) correlated per-thread via `LAST_TX`, with the
+  concrete errno decoded from the kernel `failed_transaction_log`. CLI: `--iface`,
+  `--errors`, `--include-replies`.
 
 ## Track B — offline decode
 
-- **B1 — catalog builder** (`catalog/`, Python) ✅: `bindfetto_catalog.py` turns AIDL
-  (a file, a recursed folder, or an http(s) URL) → JSON catalog, numbering methods by
-  declaration order from `FIRST_CALL_TRANSACTION` and honoring explicit `= N`; skips
-  consts/nested types; strips comments+annotations. Stdlib-only, unit-tested, and
-  verified end-to-end (generated catalog → Rust decoder) and against a live AOSP
-  `.aidl` URL.
-- **B2 — shared decoder core + `bindfetto-decode` CLI** (`decode/`, Rust): line
-  parse + catalog lookup → method name. In progress.
-  - ✅ Core crate: `Catalog`/`Decoder`, prefix-agnostic `decode_line` rewrite,
-    structured `Record`/`Label` parse, special-transaction table, unit tests.
-  - ✅ `bindfetto-decode` stdin→stdout / file CLI.
-  - ✅ C ABI (`decode/src/ffi.rs` + `decode/include/bindfetto_decode.h`,
-    staticlib/cdylib crate types) for native embedders; verified with a C smoke test.
-  - ✅ WASM: core builds for `wasm32-unknown-unknown`; `plugins/vscode/wasm/` re-exports
-    the decoder ABI + a byte allocator. All expected symbols exported.
-- **B3 — viewer plugins**:
-  - ✅ DLT Viewer plugin (`plugins/dlt/`, C++/Qt `QDLTPluginDecoderInterface` over the
-    C ABI): verified end-to-end on macOS (Qt 6.11) — loads via `QPluginLoader`,
-    `decodeMsg` rewrites via the core. `loadConfig` takes a catalog file or a folder
-    (merged via `QJsonObject`).
-  - ✅ VS Code extension (`plugins/vscode/`, TypeScript over the WASM core): one command
-    (**Decode Active Editor**) + `bindfetto.catalogPath` setting; `src/decoder.ts`
-    marshals strings across the wasm boundary. `bindfetto.catalogPath` takes a catalog
-    file or a folder (every *.json merged). Verified on Node 26: wasm builds/exports,
-    `tsc` clean, Node smoke + compiled-decoder end-to-end decode pass.
+- **B1 — catalog builder** (`catalog/`, Python) ✅ AIDL (file / folder / URL) →
+  `interface → {code → method}` JSON; declaration-order numbering from
+  `FIRST_CALL_TRANSACTION`, honors explicit `= N`. Stdlib-only, unit-tested.
+- **B2 — decoder core + CLI** (`decode/`, Rust) ✅ `Catalog`/`Decoder`, prefix-agnostic
+  `decode_line`, the `bindfetto-decode` CLI, a C ABI (staticlib/cdylib + header), and a
+  WASM build (`wasm32-unknown-unknown`).
+- **B3 — viewer plugins** ✅ DLT Viewer plugin (C++/Qt over the C ABI) and VS Code
+  extension (TypeScript over WASM). Both verified end-to-end.
 
 ## Track C — control app (`app/`, Kotlin)
 
-- **C1 — control channel.** ✅ `--control [port]` (default 3491): a line-oriented TCP
-  server driving the runtime live via a shared `RuntimeState`. Commands: `STATUS`;
-  `START`/`STOP` (capture toggle); `SINK`; `DLT on|off`; `TRACK on|off` (interface
-  discovery, off by default); `LIST`/`GET`/`SET`/`CLEAR` (in-kernel filter). Enabling
-  `--control` auto-binds the DLT server. (TCP over localhost / `adb forward` was chosen
-  over the SPEC's unix-socket + `SO_PEERCRED` design for testability; hardening deferred.)
-- **C2 — app.** ✅ Kotlin + Jetpack Compose app under `app/`, three tabs:
-  - **Control** — Connect + live STATUS, Start/Stop, sink selector, DLT toggle.
-  - **Filter** — discovery enabled only while the tab is open, checkbox list, Apply/Clear
-    push the in-kernel filter.
-  - **Deploy** — best-effort deploy of the bundled binary via `su`, with an `adb` fallback.
+- **C1 — control channel** ✅ `--control [port]`: a line-TCP server over a shared
+  `RuntimeState` — `STATUS`, `START`/`STOP`, `SINK`, `DLT`, `ERRORS`, `TRACK`,
+  `LIST`/`GET`/`SET`/`CLEAR`. Auto-binds the DLT server.
+- **C2 — app** ✅ Jetpack Compose app, three tabs: **Control** (status, capture, sink,
+  DLT + error toggles), **Filter** (interface discovery, search + manual add,
+  apply/clear the in-kernel filter), **Deploy** (detached `su`/adb launch of the
+  daemon). Verified end-to-end on the AVD.
 
-  Verified end-to-end on the AVD (headless via `uiautomator dump` + `input tap`): every
-  Control action round-trips through STATUS; discovery toggles with the Filter tab; Apply
-  narrows the in-kernel capture; Deploy falls back to adb (no root/signature on a debug
-  build). The Control tab now also carries an **Error capture** switch (`ERRORS on|off`,
-  M5). Still TODO: verified privileged deploy.
+## Open / deferred
 
-Tracks B and C start once Track A produces stable output (≈after M3).
+- **Control channel hardening** — unix-socket + `SO_PEERCRED` (currently TCP/localhost
+  for testability).
+- **Verified privileged deploy** — needs platform signing or root; debug builds fall
+  back to the adb path.
