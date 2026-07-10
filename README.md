@@ -9,11 +9,21 @@ as human-readable transaction logs. Instead of guessing at cross-process calls, 
 see the live flow of Binder transactions — who called whom, over which interface, with
 which method, and whether it failed.
 
+> **The highlight: offline method-name decoding.** The kernel hot path stays cheap by
+> emitting only the *raw* transaction code (`IVehicle.[code:3]`). A separate offline
+> pass — in the CLI, DLT Viewer, or VS Code — resolves that code to the real method name
+> against a precompiled **AIDL catalog**. Because it's a catalog lookup, not runtime
+> introspection, the same captured logs can be re-decoded against any catalog version
+> after the fact.
+
 ```text
 com.android.car (11428) -> vehicle@V1-service (11410): android.hardware.automotive.vehicle.IVehicle.startService, 228B
 vehicle@V1-service (11410) -> com.android.car (11428): <reply code:0>, 4B
 system_server (1523) -> media.player (2841): android.media.IMediaPlayer.[code:3] !! BR_DEAD_REPLY (dead node, -3)
 ```
+
+The `startService` above is the decoded form of `IVehicle.[code:3]` — resolved offline
+from the catalog.
 
 The bundled Android **control app** drives the on-device daemon live — toggle capture,
 switch sinks, stream to DLT, and pick which interfaces to keep:
