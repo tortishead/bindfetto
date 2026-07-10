@@ -5,16 +5,14 @@
 ## Live kernel-level Binder IPC tracing for Android
 
 Bindfetto observes Android **Binder** IPC traffic at the kernel level and surfaces it
-as human-readable transaction logs. Instead of guessing at cross-process calls, you
-see the live flow of Binder transactions — who called whom, over which interface, with
-which method, and whether it failed. Ideal for automotive development and in-car testing.
+as human-readable transaction logs.
 
 > **The highlight: offline method-name decoding.** The kernel hot path stays cheap by
-> emitting only the *raw* transaction code (`IVehicle.[code:3]`). A separate offline
-> pass — in the CLI, DLT Viewer, or VS Code — resolves that code to the real method name
-> against a precompiled **AIDL catalog**. Because it's a catalog lookup, not runtime
-> introspection, the same captured logs can be re-decoded against any catalog version
-> after the fact.
+> emitting only the *raw* transaction code. A separate offline pass — in the CLI, DLT
+> Viewer, or VS Code — resolves that code to the real method name against a precompiled
+> **AIDL catalog**.
+
+No external tooling required — ideal for automotive development and in-car testing.
 
 ```text
 com.android.car (11428) -> vehicle@V1-service (11410): android.hardware.automotive.vehicle.IVehicle.startService, 228B
