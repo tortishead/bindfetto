@@ -66,6 +66,21 @@ class BuilderTest(unittest.TestCase):
         # A no-arg method still gets an (empty) args list in v2.
         self.assertEqual(cat["com.example.ITricky"][4], {"name": "ping", "args": []})
 
+    def test_without_args_stays_v1_name_only(self):
+        # The default (no --args) must keep emitting bare name strings.
+        cat = bc.build_catalog([os.path.join(FIXTURES, "ITricky.aidl")])
+        self.assertEqual(cat["com.example.ITricky"][3], "echo")
+
+    def test_param_helpers_split_and_type(self):
+        # Multiple primitive params split cleanly and keep their base types.
+        params = list(bc._split_params("long a, boolean b, double c"))
+        self.assertEqual(params, ["long a", "boolean b", "double c"])
+        self.assertEqual(bc._parse_param("in @nullable String tag"),
+                         {"name": "tag", "type": "String"})
+        # A generic with a comma is one parameter, not two.
+        self.assertEqual(list(bc._split_params("List<Map<K,V>> xs, int n")),
+                         ["List<Map<K,V>> xs", "int n"])
+
     def test_json_is_sorted_and_string_keyed(self):
         cat = bc.build_catalog([os.path.join(FIXTURES, "IActivityManager.aidl")])
         text = bc.to_json(cat)

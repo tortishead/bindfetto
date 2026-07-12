@@ -131,3 +131,52 @@ pub fn special_transaction(code: u32) -> Option<&'static str> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A catalog mixing v1 (bare name) and v2 (name + args) entries; the decoder must
+    // accept both shapes.
+    const MIXED: &str = r#"{
+        "a.IV1": { "1": "getName" },
+        "a.IV2": {
+            "1": { "name": "noArgs", "args": [] },
+            "2": { "name": "withArgs", "args": [
+                { "name": "flags", "type": "int" },
+                { "name": "tag", "type": "String" }
+            ] }
+        }
+    }"#;
+
+    #[test]
+    fn resolves_names_from_both_versions() {
+        let c = Catalog::from_json(MIXED).unwrap();
+        assert_eq!(c.method("a.IV1", 1), Some("getName"));
+        assert_eq!(c.method("a.IV2", 2), Some("withArgs"));
+        assert_eq!(c.method("a.IV2", 9), None);
+        assert_eq!(c.method("a.unknown", 1), None);
+    }
+
+    #[test]
+    fn v1_entry_has_no_args() {
+        let c = Catalog::from_json(MIXED).unwrap();
+        assert_eq!(c.args("a.IV1", 1), Some(&[][..]));
+    }
+
+    #[test]
+    fn v2_args_are_parsed_in_order() {
+        let c = Catalog::from_json(MIXED).unwrap();
+        assert_eq!(c.args("a.IV2", 1), Some(&[][..])); // explicit empty
+        let args = c.args("a.IV2", 2).unwrap();
+        assert_eq!(args.len(), 2);
+        assert_eq!((args[0].name.as_str(), args[0].ty.as_str()), ("flags", "int"));
+        assert_eq!((args[1].name.as_str(), args[1].ty.as_str()), ("tag", "String"));
+    }
+
+    #[test]
+    fn args_of_unknown_code_is_none() {
+        let c = Catalog::from_json(MIXED).unwrap();
+        assert!(c.args("a.IV2", 99).is_none());
+    }
+}

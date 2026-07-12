@@ -223,3 +223,49 @@ fn iface_before(line: &str, end: usize) -> &str {
     let s = &line[start..end];
     s.trim_start_matches('.')
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_hex_pairs_bytes() {
+        assert_eq!(decode_hex("00ff10"), vec![0x00, 0xff, 0x10]);
+        assert_eq!(decode_hex(""), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn decode_hex_ignores_trailing_half_byte() {
+        // Odd length: the dangling nibble is dropped, not misread.
+        assert_eq!(decode_hex("abc"), vec![0xab]);
+    }
+
+    #[test]
+    fn decode_hex_stops_at_non_hex() {
+        assert_eq!(decode_hex("deadZZ00"), vec![0xde, 0xad]);
+    }
+
+    #[test]
+    fn parse_parcel_locates_token_and_span() {
+        let line = "a (1) -> b (2): x.IY.[code:1], 8B parcel=2/8:00ff";
+        let p = parse_parcel(line).expect("token found");
+        assert_eq!(p.bytes, vec![0x00, 0xff]);
+        // The span covers the leading space through the hex, so stripping it leaves the
+        // line clean.
+        assert_eq!(&line[p.start..p.end], " parcel=2/8:00ff");
+    }
+
+    #[test]
+    fn parse_parcel_hex_stops_at_trailing_text() {
+        // A trailing token after the hex must not be swallowed into the payload.
+        let line = "... parcel=1/1:0a oneway";
+        let p = parse_parcel(line).expect("token found");
+        assert_eq!(p.bytes, vec![0x0a]);
+        assert_eq!(&line[p.end..], " oneway");
+    }
+
+    #[test]
+    fn parse_parcel_absent_is_none() {
+        assert!(parse_parcel("a (1) -> b (2): x.IY.startWork, 8B").is_none());
+    }
+}

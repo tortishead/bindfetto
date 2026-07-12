@@ -272,3 +272,205 @@ fn push_escaped(out: &mut String, s: &str) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- parcel builders (mirror Binder's writeInterfaceToken + marshalling) --------
+
+    fn put_string16(out: &mut Vec<u8>, s: &str) {
+        let units: Vec<u16> = s.encode_utf16().collect();
+        out.extend_from_slice(&(units.len() as u32).to_le_bytes());
+        for u in &units {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+        out.extend_from_slice(&0u16.to_le_bytes()); // null terminator
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+    }
+
+    /// Header (`writeInterfaceToken` framing) + a marshalled `body`.
+    fn parcel(descriptor: &str, body: &[u8]) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_le_bytes()); // strict-mode policy
+        p.extend_from_slice(&0u32.to_le_bytes()); // work-source
+        p.extend_from_slice(&HEADER_MAGIC.to_le_bytes()); // 'SYST'
+        put_string16(&mut p, descriptor);
+        p.extend_from_slice(body);
+        p
+    }
+
+    fn arg(name: &str, ty: &str) -> Arg {
+        Arg {
+            name: name.into(),
+            ty: ty.into(),
+        }
+    }
+
+    fn render(args: &[Arg], body: &[u8]) -> Option<String> {
+        let mut out = String::new();
+        if render_args(&mut out, args, &parcel("test.IFoo", body)) {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    // --- ParcelReader primitives ----------------------------------------------------
+
+    #[test]
+    fn reads_fixed_width_primitives() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&(-7i32).to_le_bytes());
+        body.extend_from_slice(&0x0011_2233_4455_6677i64.to_le_bytes());
+        body.extend_from_slice(&1.5f32.to_le_bytes());
+        body.extend_from_slice(&(-2.25f64).to_le_bytes());
+        let p = parcel("test.IFoo", &body);
+        let mut r = ParcelReader::new(&p);
+        assert!(r.seek_args());
+        assert_eq!(r.read_i32(), Some(-7));
+        assert_eq!(r.read_i64(), Some(0x0011_2233_4455_6677));
+        assert_eq!(r.read_f32(), Some(1.5));
+        assert_eq!(r.read_f64(), Some(-2.25));
+        assert!(!r.truncated());
+    }
+
+    #[test]
+    fn reads_string16_and_null() {
+        let mut body = Vec::new();
+        put_string16(&mut body, "hi");
+        body.extend_from_slice(&(-1i32).to_le_bytes()); // null String16
+        let p = parcel("test.IFoo", &body);
+        let mut r = ParcelReader::new(&p);
+        assert!(r.seek_args());
+        assert_eq!(r.read_string16(), Some(Some("hi".to_string())));
+        assert_eq!(r.read_string16(), Some(None));
+    }
+
+    #[test]
+    fn seek_args_rejects_tokenless_parcel() {
+        // No 'SYST' magic at offset 8 → not an interface token.
+        let mut r = ParcelReader::new(&[0u8; 32]);
+        assert!(!r.seek_args());
+    }
+
+    #[test]
+    fn reads_flag_truncation_past_the_end() {
+        // Ask for an i64 when only 4 bytes remain in the whole buffer.
+        let mut r = ParcelReader::new(&[1, 0, 0, 0]);
+        assert_eq!(r.read_i64(), None);
+        assert!(r.truncated());
+    }
+
+    // --- render_args over each type -------------------------------------------------
+
+    #[test]
+    fn renders_all_scalar_types() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1i32.to_le_bytes()); // boolean true
+        body.extend_from_slice(&0i32.to_le_bytes()); // boolean false
+        body.extend_from_slice(&42i32.to_le_bytes()); // int
+        body.extend_from_slice(&(-5i64).to_le_bytes()); // long
+        body.extend_from_slice(&0.5f32.to_le_bytes()); // float
+        body.extend_from_slice(&3.0f64.to_le_bytes()); // double
+        let args = [
+            arg("a", "boolean"),
+            arg("b", "boolean"),
+            arg("c", "int"),
+            arg("d", "long"),
+            arg("e", "float"),
+            arg("f", "double"),
+        ];
+        assert_eq!(
+            render(&args, &body).as_deref(),
+            Some("(a=true, b=false, c=42, d=-5, e=0.5, f=3)")
+        );
+    }
+
+    #[test]
+    fn renders_widened_integer_types() {
+        // byte/char/short all marshal as int32 on the wire.
+        let mut body = Vec::new();
+        for v in [255i32, 65, 1000] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        let args = [arg("b", "byte"), arg("c", "char"), arg("s", "short")];
+        assert_eq!(
+            render(&args, &body).as_deref(),
+            Some("(b=255, c=65, s=1000)")
+        );
+    }
+
+    #[test]
+    fn strips_direction_and_annotation_from_type() {
+        let mut body = Vec::new();
+        put_string16(&mut body, "ok");
+        body.extend_from_slice(&9i32.to_le_bytes());
+        let args = [arg("s", "in @nullable String"), arg("n", "out int")];
+        assert_eq!(render(&args, &body).as_deref(), Some(r#"(s="ok", n=9)"#));
+    }
+
+    #[test]
+    fn null_string_renders_as_null() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&(-1i32).to_le_bytes());
+        assert_eq!(
+            render(&[arg("s", "String")], &body).as_deref(),
+            Some("(s=null)")
+        );
+    }
+
+    #[test]
+    fn unparsable_type_stops_with_note() {
+        // IBinder has no fixed layout — decoding stops at it.
+        let body = [0u8; 8];
+        assert_eq!(
+            render(&[arg("t", "IBinder")], &body).as_deref(),
+            Some("(t=<IBinder>, …(unparsed))")
+        );
+    }
+
+    #[test]
+    fn array_type_stops_unparsed() {
+        // `T[]` / `List<T>` aren't decoded in the first cut.
+        let body = [0u8; 8];
+        assert_eq!(
+            render(&[arg("xs", "int[]")], &body).as_deref(),
+            Some("(xs=<int[]>, …(unparsed))")
+        );
+    }
+
+    #[test]
+    fn truncation_rolls_back_partial_arg() {
+        // First arg fits, second runs off the captured end.
+        let body = 7i32.to_le_bytes();
+        assert_eq!(
+            render(&[arg("a", "int"), arg("b", "int")], &body).as_deref(),
+            Some("(a=7, …(truncated))")
+        );
+    }
+
+    #[test]
+    fn tokenless_parcel_renders_nothing() {
+        let mut out = String::new();
+        assert!(!render_args(&mut out, &[arg("a", "int")], &[0u8; 32]));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn string_value_is_escaped_and_clamped() {
+        let mut body = Vec::new();
+        put_string16(&mut body, "a\"b\nc");
+        assert_eq!(
+            render(&[arg("s", "String")], &body).as_deref(),
+            Some("(s=\"a\\\"b\\nc\")")
+        );
+        // A very long string is clamped with an ellipsis.
+        let mut long = Vec::new();
+        put_string16(&mut long, &"z".repeat(200));
+        let out = render(&[arg("s", "String")], &long).unwrap();
+        assert!(out.contains('…') && out.len() < 200);
+    }
+}
