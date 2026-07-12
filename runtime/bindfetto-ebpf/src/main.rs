@@ -1,16 +1,18 @@
 #![no_std]
 #![no_main]
 
-//! Bindfetto probe (M1–M5).
+//! Bindfetto probe (M1–M6).
 //!
 //! Three attach points, correlated per-thread:
 //!
 //! * **kprobe on `binder_transaction()`** — runs at function entry, reads the
 //!   parcel size and the interface descriptor from the `binder_transaction_data`
-//!   argument, and stashes them keyed by pid_tgid.
+//!   argument, applies the interface filter, and stashes them keyed by pid_tgid
+//!   (a filtered-out transaction inserts nothing — absence is the drop signal).
 //! * **tracepoint `binder:binder_transaction`** — runs later inside the same call,
 //!   reads the target pid / code / flags, pulls the stashed size+descriptor, and
-//!   emits a [`TxEvent`] to the ring buffer.
+//!   emits a [`TxEvent`] — or, with parcel capture on (M6), a variable-length
+//!   [`TxRecord`] staged in a per-CPU scratch map — to the ring buffer.
 //! * **tracepoint `binder:binder_return`** — the return/error path (M5). When error
 //!   capture is enabled it watches for `BR_FAILED_REPLY`/`BR_DEAD_REPLY`/
 //!   `BR_FROZEN_REPLY` and emits an error [`TxEvent`], correlating it to the calling
@@ -24,6 +26,7 @@ use aya_ebpf::{
     macros::{kprobe, map, tracepoint},
     maps::{Array, HashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, TracePointContext},
+    EbpfContext as _,
 };
 use bindfetto_common::{
     is_error_return, IfaceKey, TxEvent, TxRecord, IFACE_HEADER_MAGIC, MAX_IFACE_BYTES,
@@ -43,7 +46,9 @@ static STASH: HashMap<u64, Stash> = HashMap::with_max_entries(10240, 0);
 /// In-kernel interface filter: descriptors the operator asked to keep. Populated from
 /// userspace (`--iface`). When [`FILTER_ON`] is set, a transaction is dropped **before**
 /// the ring buffer unless its captured descriptor is a key here — cutting the probe's
-/// output volume and observer effect on the traced device.
+/// output volume and observer effect on the traced device. Using the full descriptor as
+/// the key makes the match collision-free and exact (the kernel htab still jhashes the
+/// 256-byte key internally; what we avoid is any truncation/collision handling of ours).
 #[map]
 static WANTED: HashMap<IfaceKey, u8> = HashMap::with_max_entries(256, 0);
 
@@ -97,24 +102,21 @@ static PARCEL_SCRATCH: PerCpuArray<TxRecord> = PerCpuArray::with_max_entries(1, 
 #[map]
 static LAST_TX: HashMap<u64, TxEvent> = HashMap::with_max_entries(10240, 0);
 
+/// Per-thread hand-off payload from the kprobe to the tracepoint. **Presence is the
+/// keep signal**: when the interface filter drops a transaction, the kprobe skips the
+/// insert entirely (the dominant case while filtering), so the dropped path never pays
+/// the ~272-byte map copy and the tracepoint never pays the read-back. Layout is
+/// gap-free (u64 then two u32s, then the array) — the kprobe copies the whole struct
+/// into the map and the verifier rejects reads of uninitialized padding.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Stash {
     /// Sender-side (untagged) userspace pointer to the parcel buffer, handed to the
     /// tracepoint so it can copy the raw payload straight into the ring slot (M6) — the
-    /// bytes never touch the BPF stack. 0 when the kprobe couldn't read it. Kept first
-    /// (u64) so the trailing u32s leave no interior padding.
+    /// bytes never touch the BPF stack. 0 when the kprobe couldn't read it.
     buf_ptr: u64,
     data_size: u32,
     iface_byte_len: u32,
-    /// 1 = emit this transaction, 0 = drop it (interface filter decided in the kprobe,
-    /// where the descriptor is available; the tracepoint enforces it).
-    keep: u32,
-    /// Explicit, zero-initialized padding: the kprobe copies the whole `Stash` into the
-    /// `STASH` map and the verifier rejects a map read that touches *uninitialized* tail
-    /// padding. Three u32s after the u64 would leave a 4-byte implicit gap before `iface`;
-    /// naming it and zeroing it makes every byte defined.
-    _pad: u32,
     iface: [u8; MAX_IFACE_BYTES],
 }
 
@@ -147,45 +149,43 @@ fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
     // arg3 = int reply. Unless `--include-replies` is set, the tracepoint drops replies,
     // so skip all their work here too (user-memory reads + stash insert) — replies are
     // ~half of all traffic. Truncate to u32: the ABI doesn't guarantee the register's
-    // upper bits for int.
+    // upper bits for int. Only replies pay the INCLUDE_REPLIES map lookup.
     let reply: usize = ctx.arg(3).ok_or(1i64)?;
     let is_reply = reply as u32 != 0;
-    let include_replies = INCLUDE_REPLIES.get(0).copied().unwrap_or(0) != 0;
-    if is_reply && !include_replies {
+    if is_reply && INCLUDE_REPLIES.get(0).copied().unwrap_or(0) == 0 {
         return Ok(());
     }
 
-    // arg2 = struct binder_transaction_data *tr (kernel pointer to a copied-in struct)
+    // arg2 = struct binder_transaction_data *tr (kernel pointer to a copied-in struct).
+    // data_size (+32), offsets_size (+40, unused) and data.ptr.buffer (+48) are
+    // contiguous, so one 24-byte read replaces two helper calls.
     let tr: usize = ctx.arg(2).ok_or(1i64)?;
-
-    let data_size = unsafe { bpf_probe_read_kernel((tr + TR_DATA_SIZE) as *const u64) }? as u32;
+    let tr_words = unsafe { bpf_probe_read_kernel((tr + TR_DATA_SIZE) as *const [u64; 3]) }?;
+    let data_size = tr_words[0] as u32;
     // data.ptr.buffer is a sender-side userspace pointer. On AArch64 it may carry a tag
     // in the top byte (TBI is always on; ARM MTE puts a logical tag in bits 59-56).
     // Strip the top byte before pointer arithmetic + user reads so we don't depend on a
     // given kernel untagging it for us; user VAs live in TTBR0 low range, so the top
     // byte is purely tag and this is a no-op on untagged pointers.
-    let buf_ptr =
-        (unsafe { bpf_probe_read_kernel((tr + TR_BUFFER_PTR) as *const u64) }? as usize)
-            & 0x00ff_ffff_ffff_ffff;
+    let buf_ptr = (tr_words[2] as usize) & 0x00ff_ffff_ffff_ffff;
 
     let mut stash = Stash {
         buf_ptr: buf_ptr as u64,
         data_size,
         iface_byte_len: 0,
-        keep: 1,
-        _pad: 0,
         iface: [0u8; MAX_IFACE_BYTES],
     };
 
     // The parcel data lives in the sender's userspace at buf_ptr. If it starts with
-    // an interface token, offset 8 holds the 'SYST' magic. A parcel smaller than the
-    // token header (16 bytes) can't carry one — don't even read the magic. Replies
-    // (only reachable here under `--include-replies`) never carry a token, so skip it.
+    // an interface token, offset 8 holds the 'SYST' magic and offset 12 the UTF-16
+    // code-unit count — adjacent, so one u64 read fetches both (LE: magic in the low
+    // half). A parcel smaller than the token header (16 bytes) can't carry one — don't
+    // even read the magic. Replies (only reachable here under `--include-replies`)
+    // never carry a token, so skip it.
     if !is_reply && data_size as usize >= P_STR {
-        let magic = unsafe { bpf_probe_read_user((buf_ptr + P_MAGIC) as *const u32) }.unwrap_or(0);
-        if magic == IFACE_HEADER_MAGIC {
-            let units =
-                unsafe { bpf_probe_read_user((buf_ptr + P_STRLEN) as *const u32) }.unwrap_or(0);
+        let head = unsafe { bpf_probe_read_user((buf_ptr + P_MAGIC) as *const u64) }.unwrap_or(0);
+        if head as u32 == IFACE_HEADER_MAGIC {
+            let units = (head >> 32) as u32;
             // Read only the descriptor's own bytes, clamped to our buffer and to the
             // parcel payload: a fixed MAX_IFACE_BYTES read could cross into an unmapped
             // page past a short parcel and fail, losing a perfectly valid descriptor.
@@ -210,21 +210,38 @@ fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
         }
     }
 
+    let pid_tgid = bpf_get_current_pid_tgid();
+
     // Interface filter (M4): when enabled, keep only transactions whose captured
-    // descriptor is in WANTED. The full descriptor is the map key, so no hashing is
-    // needed on the hot path. Tokenless / unreadable transactions have an all-zero
-    // key that userspace never inserts, so they drop while filtering is on.
+    // descriptor is in WANTED (full descriptor as the key = exact, collision-free
+    // match). Tokenless / unreadable transactions have an all-zero key that userspace
+    // never inserts, so they drop while filtering is on. A dropped transaction **skips
+    // the stash insert entirely** — no stash is the tracepoint's drop signal — so the
+    // filtered-out majority never pays the ~272-byte map copy. Remove any stale entry
+    // instead (a prior call on this thread that failed before its tracepoint would
+    // otherwise leave one behind to be mis-attributed).
     if FILTER_ON.get(0).copied().unwrap_or(0) != 0 {
         // Reinterpret the captured bytes as the key in place — IfaceKey is
         // repr(transparent) over [u8; MAX_IFACE_BYTES], so this avoids a second
         // 256-byte copy that would blow the 512-byte BPF stack.
         let key = unsafe { &*(stash.iface.as_ptr() as *const IfaceKey) };
-        stash.keep = unsafe { WANTED.get(key).is_some() } as u32;
+        if unsafe { WANTED.get(key) }.is_none() {
+            let _ = STASH.remove(&pid_tgid);
+            return Ok(());
+        }
     }
 
-    let pid_tgid = bpf_get_current_pid_tgid();
     let _ = STASH.insert(&pid_tgid, &stash, 0);
     Ok(())
+}
+
+/// Read a tracepoint field directly from the context at a constant offset. For
+/// tracepoint programs the verifier allows direct (aligned, in-bounds) ctx loads, so
+/// this compiles to a single load instruction — aya's `read_at` goes through the
+/// `bpf_probe_read` helper instead, one call per field.
+#[inline(always)]
+fn tp_read<T: Copy>(ctx: &TracePointContext, off: usize) -> T {
+    unsafe { core::ptr::read((ctx.as_ptr() as *const u8).add(off) as *const T) }
 }
 
 #[tracepoint(category = "binder", name = "binder_transaction")]
@@ -237,10 +254,8 @@ pub fn binder_transaction(ctx: TracePointContext) -> u32 {
 
 fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
-    let src_pid = (pid_tgid >> 32) as u32;
-    let src_tid = pid_tgid as u32;
 
-    let reply = unsafe { ctx.read_at::<i32>(OFF_REPLY) }? as u32;
+    let reply = tp_read::<i32>(ctx, OFF_REPLY) as u32;
     // Normal (successful) replies are noise — a code:0 ack per call. Drop them here,
     // before the ring buffer, still clearing the per-thread stash. Error replies come
     // from the binder_return attach point (M5). `--include-replies` re-enables them.
@@ -249,41 +264,44 @@ fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
         return Ok(());
     }
 
-    let dst_pid = unsafe { ctx.read_at::<i32>(OFF_TO_PROC) }? as u32;
-    let code = unsafe { ctx.read_at::<u32>(OFF_CODE) }?;
-    let flags = unsafe { ctx.read_at::<u32>(OFF_FLAGS) }?;
-    let debug_id = unsafe { ctx.read_at::<i32>(OFF_DEBUG_ID) }?;
+    // Consult the stash *before* building anything: no stash while filtering means the
+    // kprobe dropped this transaction (or couldn't capture a descriptor to match), so
+    // the filtered-out majority exits here having paid only a hash lookup — no field
+    // reads, no ktime, no 304-byte event init.
+    let stash = unsafe { STASH.get(&pid_tgid) };
+    if stash.is_none() && FILTER_ON.get(0).copied().unwrap_or(0) != 0 {
+        return Ok(());
+    }
 
     let mut ev = TxEvent {
         ts_ns: unsafe { bpf_ktime_get_ns() },
-        src_pid,
-        src_tid,
-        dst_pid,
-        code,
-        flags,
+        src_pid: (pid_tgid >> 32) as u32,
+        src_tid: pid_tgid as u32,
+        dst_pid: tp_read::<i32>(ctx, OFF_TO_PROC) as u32,
+        code: tp_read::<u32>(ctx, OFF_CODE),
+        flags: tp_read::<u32>(ctx, OFF_FLAGS),
         reply,
         data_size: 0,
         err_code: 0,
-        debug_id,
+        debug_id: tp_read::<i32>(ctx, OFF_DEBUG_ID),
         iface_byte_len: 0,
         iface: [0u8; MAX_IFACE_BYTES],
     };
-    // Default keep when there's no stash (kprobe didn't run/insert): drop iff filtering
-    // is active, since we then have no descriptor to match against a wanted interface.
-    let mut keep = FILTER_ON.get(0).copied().unwrap_or(0) == 0;
     // Parcel buffer pointer (M6), carried from the kprobe; 0 when unavailable.
     let mut buf_ptr = 0u64;
-    if let Some(stash) = unsafe { STASH.get(&pid_tgid) } {
+    // Copy out of the map value *before* the remove — the element can be reused by
+    // another CPU's insert the moment it's deleted.
+    let had_stash = if let Some(stash) = stash {
         ev.data_size = stash.data_size;
         ev.iface_byte_len = stash.iface_byte_len;
         ev.iface = stash.iface;
-        keep = stash.keep != 0;
         buf_ptr = stash.buf_ptr;
-    }
-    let _ = STASH.remove(&pid_tgid);
-
-    if !keep {
-        return Ok(());
+        true
+    } else {
+        false
+    };
+    if had_stash {
+        let _ = STASH.remove(&pid_tgid);
     }
 
     // Error capture (M5): remember this kept, outgoing transaction so the binder_return
@@ -365,41 +383,37 @@ fn try_return(ctx: &TracePointContext) -> Result<(), i64> {
     if ERRORS_ON.get(0).copied().unwrap_or(0) == 0 {
         return Ok(());
     }
-    let cmd = unsafe { ctx.read_at::<u32>(OFF_RETURN_CMD) }?;
+    let cmd = tp_read::<u32>(ctx, OFF_RETURN_CMD);
     if !is_error_return(cmd) {
         return Ok(());
     }
 
+    // Correlate to this thread's last captured transaction *before* building the event.
+    // No record → we weren't capturing that transaction (e.g. filtered out), so don't
+    // report an orphan error — and don't pay the 304-byte event init for it.
     let pid_tgid = bpf_get_current_pid_tgid();
-    let mut ev = TxEvent {
+    let Some(last) = (unsafe { LAST_TX.get(&pid_tgid) }) else {
+        return Ok(());
+    };
+
+    // Read the fields through the map reference (a single 256-byte descriptor copy into
+    // `ev`); materializing a whole copy on the stack alongside `ev` would blow the
+    // 512-byte BPF stack. Copy before the remove — the element can be reused by another
+    // CPU's insert the moment it's deleted.
+    let ev = TxEvent {
         ts_ns: unsafe { bpf_ktime_get_ns() },
         src_pid: (pid_tgid >> 32) as u32,
         src_tid: pid_tgid as u32,
-        dst_pid: 0,
-        code: 0,
+        dst_pid: last.dst_pid,
+        code: last.code,
         flags: 0,
         reply: 0,
         data_size: 0,
         err_code: cmd,
-        debug_id: 0,
-        iface_byte_len: 0,
-        iface: [0u8; MAX_IFACE_BYTES],
+        debug_id: last.debug_id,
+        iface_byte_len: last.iface_byte_len,
+        iface: last.iface,
     };
-    // Correlate to this thread's last captured transaction. No record → we weren't
-    // capturing that transaction (e.g. filtered out), so don't report an orphan error.
-    // Read the fields through the map reference (a single 256-byte descriptor copy into
-    // `ev`); materializing a whole `LastTx` on the stack alongside `ev` would blow the
-    // 512-byte BPF stack.
-    match unsafe { LAST_TX.get(&pid_tgid) } {
-        Some(last) => {
-            ev.dst_pid = last.dst_pid;
-            ev.code = last.code;
-            ev.debug_id = last.debug_id;
-            ev.iface_byte_len = last.iface_byte_len;
-            ev.iface = last.iface;
-        }
-        None => return Ok(()),
-    }
     // One failure per transaction: drop the record so a later unrelated return on this
     // thread can't re-attribute the same call.
     let _ = LAST_TX.remove(&pid_tgid);
