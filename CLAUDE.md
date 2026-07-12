@@ -69,6 +69,8 @@ npm install && npm run build:wasm && npm run compile && npm run smoke   # plugin
 
 Runtime CLI flags: `--sink console|logcat|both|none`, `--jsonl <path>`,
 `--dlt-serve [port]` (3490), `--iface <name>` (repeatable, exact match), `--errors [on|off]`,
+`--parcel [on|off]` (M6 parcel capture; only honored with an active `--iface` filter),
+`--parcel-max <bytes>` (per-transaction payload cap, default 256, clamped to a 30 KiB ceiling),
 `--include-replies`, `--control [port]` (3491, auto-binds DLT). On a new device, confirm the
 tracepoint offsets in `bindfetto-ebpf/src/main.rs` against
 `/sys/kernel/tracing/events/binder/binder_transaction/format`.

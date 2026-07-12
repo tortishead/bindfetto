@@ -42,6 +42,30 @@ class BuilderTest(unittest.TestCase):
             },
         )
 
+    def test_with_args_emits_v2_entries(self):
+        cat = bc.build_catalog(
+            [os.path.join(FIXTURES, "ITricky.aidl")], with_args=True
+        )
+        # echo(@nullable String s) — annotation and direction stripped, type kept.
+        self.assertEqual(
+            cat["com.example.ITricky"][3],
+            {"name": "echo", "args": [{"name": "s", "type": "String"}]},
+        )
+        # setValues(in int[] vals, inout Map<String,String> m) — commas inside the
+        # generic must not split the parameter list; array/generic types kept verbatim.
+        self.assertEqual(
+            cat["com.example.ITricky"][2],
+            {
+                "name": "setValues",
+                "args": [
+                    {"name": "vals", "type": "int[]"},
+                    {"name": "m", "type": "Map<String, String>"},
+                ],
+            },
+        )
+        # A no-arg method still gets an (empty) args list in v2.
+        self.assertEqual(cat["com.example.ITricky"][4], {"name": "ping", "args": []})
+
     def test_json_is_sorted_and_string_keyed(self):
         cat = bc.build_catalog([os.path.join(FIXTURES, "IActivityManager.aidl")])
         text = bc.to_json(cat)

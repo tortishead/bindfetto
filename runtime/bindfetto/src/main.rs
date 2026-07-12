@@ -34,7 +34,7 @@ mod dlt_wire;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{BufWriter, Write as _};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
@@ -44,7 +44,8 @@ use aya::{
     Ebpf,
 };
 use bindfetto_common::{
-    IfaceKey, TxEvent, BR_DEAD_REPLY, BR_FAILED_REPLY, BR_FROZEN_REPLY, MAX_IFACE_BYTES,
+    IfaceKey, TxEvent, TxRecord, BR_DEAD_REPLY, BR_FAILED_REPLY, BR_FROZEN_REPLY, MAX_IFACE_BYTES,
+    PARCEL_CAP_DEFAULT, PARCEL_CEILING,
 };
 use tokio::io::unix::AsyncFd;
 
@@ -301,6 +302,12 @@ struct RuntimeState {
     /// Whether error capture is on (`ERRORS on|off`); mirrors the ERRORS_ON BPF flag map
     /// for cheap `STATUS` reads.
     errors_on: AtomicBool,
+    /// Whether parcel payload capture is on (`PARCEL on|off`, M6); mirrors the PARCEL_ON
+    /// BPF flag map. Only enableable while the interface filter is active.
+    parcel_on: AtomicBool,
+    /// Runtime cap (bytes) on captured parcel payload (`PARCEL max <n>`); mirrors the
+    /// PARCEL_MAX BPF map. Clamped to [`PARCEL_CEILING`].
+    parcel_max: AtomicU32,
     /// The DLT server's port (0 if no server was bound); reported by `STATUS`.
     dlt_port: u16,
     /// Total transactions drained from the ring buffer.
@@ -313,6 +320,43 @@ struct RuntimeState {
     filter: Mutex<FilterCtl>,
     /// The ERRORS_ON BPF flag map, so `ERRORS on|off` can toggle error capture live.
     errors: Mutex<Array<MapData, u32>>,
+    /// The PARCEL_ON BPF flag map, so `PARCEL on|off` can toggle payload capture live.
+    parcel: Mutex<Array<MapData, u32>>,
+    /// The PARCEL_MAX BPF map (runtime payload cap in bytes), so `PARCEL max <n>` retunes
+    /// it live.
+    parcel_max_map: Mutex<Array<MapData, u32>>,
+}
+
+impl RuntimeState {
+    /// Set the PARCEL_ON flag map and mirror it into the `parcel_on` atomic. Enabling is
+    /// refused unless the interface filter is currently active (non-empty), so parcel
+    /// capture is always bounded to the operator's selected interfaces. Returns an error
+    /// string suitable for the control reply.
+    fn set_parcel(&self, on: bool) -> Result<(), String> {
+        if on && self.filter.lock().unwrap().active.is_empty() {
+            return Err("PARCEL needs an active interface filter (SET one first)".into());
+        }
+        self.parcel
+            .lock()
+            .unwrap()
+            .set(0, u32::from(on), 0)
+            .map_err(|e| e.to_string())?;
+        self.parcel_on.store(on, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Set the runtime parcel cap (bytes), clamped to [`PARCEL_CEILING`]. Returns the
+    /// value actually applied so the caller can report clamping.
+    fn set_parcel_max(&self, bytes: u32) -> Result<u32, String> {
+        let clamped = bytes.min(PARCEL_CEILING as u32);
+        self.parcel_max_map
+            .lock()
+            .unwrap()
+            .set(0, clamped, 0)
+            .map_err(|e| e.to_string())?;
+        self.parcel_max.store(clamped, Ordering::Relaxed);
+        Ok(clamped)
+    }
 }
 
 /// Control channel: a line-oriented TCP server the control app connects to (via
@@ -324,6 +368,8 @@ struct RuntimeState {
 /// * `SINK console|logcat|both|none` -> switch the text sink; reply `OK`/`ERR`.
 /// * `DLT on|off` -> toggle DLT streaming; reply `OK`.
 /// * `ERRORS on|off` -> toggle error capture (BR_FAILED/DEAD_REPLY); reply `OK`.
+/// * `PARCEL on|off` -> toggle parcel payload capture (needs an active filter); `OK`/`ERR`.
+/// * `PARCEL max <bytes>` -> set the runtime payload cap (clamped to the ceiling); `OK <n>`.
 /// * `TRACK on|off` -> toggle interface discovery; reply `OK`.
 /// * `LIST` -> every interface descriptor seen so far, one per line, then `END`.
 /// * `GET`  -> the interfaces in the active filter, one per line, then `END`.
@@ -376,13 +422,16 @@ mod control {
                     let filter_n = state.filter.lock().unwrap().active.len();
                     let body = format!(
                         "capturing={}\ndiscovering={}\nsink={}\ndlt={}\ndlt_port={}\n\
-                         errors={}\nfilter={}\ncaptured={}\nemitted={}\nEND\n",
+                         errors={}\nparcel={}\nparcel_max={}\nfilter={}\ncaptured={}\n\
+                         emitted={}\nEND\n",
                         onoff(state.capturing.load(Ordering::Relaxed)),
                         onoff(state.discovering.load(Ordering::Relaxed)),
                         sink.name(),
                         onoff(state.dlt_on.load(Ordering::Relaxed)),
                         state.dlt_port,
                         onoff(state.errors_on.load(Ordering::Relaxed)),
+                        onoff(state.parcel_on.load(Ordering::Relaxed)),
+                        state.parcel_max.load(Ordering::Relaxed),
                         filter_n,
                         state.captured.load(Ordering::Relaxed),
                         state.emitted.load(Ordering::Relaxed),
@@ -435,6 +484,34 @@ mod control {
                     }
                     None => write.write_all(b"ERR ERRORS needs on|off\n").await?,
                 },
+                "PARCEL" => {
+                    // `PARCEL max <bytes>` retunes the cap; `PARCEL on|off` toggles capture.
+                    let (sub, arg) = match rest.split_once(' ') {
+                        Some((s, a)) => (s, a.trim()),
+                        None => (rest, ""),
+                    };
+                    if sub.eq_ignore_ascii_case("max") {
+                        match arg.parse::<u32>() {
+                            Ok(bytes) => match state.set_parcel_max(bytes) {
+                                Ok(applied) => {
+                                    write.write_all(format!("OK {applied}\n").as_bytes()).await?
+                                }
+                                Err(e) => {
+                                    write.write_all(format!("ERR {e}\n").as_bytes()).await?
+                                }
+                            },
+                            Err(_) => write.write_all(b"ERR PARCEL max needs a byte count\n").await?,
+                        }
+                    } else {
+                        match on_off(rest) {
+                            Some(on) => match state.set_parcel(on) {
+                                Ok(()) => write.write_all(b"OK\n").await?,
+                                Err(e) => write.write_all(format!("ERR {e}\n").as_bytes()).await?,
+                            },
+                            None => write.write_all(b"ERR PARCEL needs on|off or max <bytes>\n").await?,
+                        }
+                    }
+                }
                 "TRACK" => match on_off(rest) {
                     Some(on) => {
                         state.discovering.store(on, Ordering::Relaxed);
@@ -469,14 +546,26 @@ mod control {
                     let n = names.len();
                     let res = state.filter.lock().unwrap().apply(&names);
                     match res {
-                        Ok(()) => write.write_all(format!("OK {n}\n").as_bytes()).await?,
+                        Ok(()) => {
+                            // Parcel capture requires an active filter; if this emptied it,
+                            // drop parcel capture to keep the invariant.
+                            if n == 0 {
+                                let _ = state.set_parcel(false);
+                            }
+                            write.write_all(format!("OK {n}\n").as_bytes()).await?
+                        }
                         Err(e) => write.write_all(format!("ERR {e}\n").as_bytes()).await?,
                     }
                 }
                 "CLEAR" => {
                     let res = state.filter.lock().unwrap().apply(&[]);
                     match res {
-                        Ok(()) => write.write_all(b"OK 0\n").await?,
+                        Ok(()) => {
+                            // Clearing the filter disables parcel capture (it may not run
+                            // device-wide).
+                            let _ = state.set_parcel(false);
+                            write.write_all(b"OK 0\n").await?
+                        }
                         Err(e) => write.write_all(format!("ERR {e}\n").as_bytes()).await?,
                     }
                 }
@@ -605,6 +694,38 @@ async fn main() -> anyhow::Result<()> {
         println!("bindfetto: including replies in the capture");
     }
 
+    // Parcel payload capture (M6): the PARCEL_ON flag map gates the in-probe copy of raw
+    // parcel bytes. Only meaningful under an active interface filter — enabling it
+    // device-wide would multiply ring traffic — so `--parcel on` is honored only when
+    // `--iface` was also given; the control channel enforces the same rule live.
+    let parcel_requested = flag_on_off(&args, "--parcel");
+    let parcel_enabled = parcel_requested && !ifaces.is_empty();
+    let mut parcel_map: Array<MapData, u32> = Array::try_from(
+        ebpf.take_map("PARCEL_ON").context("PARCEL_ON map missing")?,
+    )?;
+    parcel_map
+        .set(0, u32::from(parcel_enabled), 0)
+        .context("set PARCEL_ON")?;
+    // Runtime payload cap (`--parcel-max <bytes>`, default 256), clamped to the ceiling.
+    let parcel_cap = arg_value(&args, "--parcel-max")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(PARCEL_CAP_DEFAULT)
+        .min(PARCEL_CEILING as u32);
+    let mut parcel_max_map: Array<MapData, u32> = Array::try_from(
+        ebpf.take_map("PARCEL_MAX").context("PARCEL_MAX map missing")?,
+    )?;
+    parcel_max_map
+        .set(0, parcel_cap, 0)
+        .context("set PARCEL_MAX")?;
+    if parcel_requested && !parcel_enabled {
+        println!(
+            "bindfetto: --parcel ignored — parcel capture needs an interface filter \
+             (pass --iface, or SET one over the control channel then PARCEL on)"
+        );
+    } else if parcel_enabled {
+        println!("bindfetto: parcel payload capture on (up to {parcel_cap}B/transaction)");
+    }
+
     // Shared runtime state: capture on by default, discovery off (only tracked when the
     // app asks), sink from `--sink`, DLT streaming on iff `--dlt-serve` was explicit.
     let state = Arc::new(RuntimeState {
@@ -613,12 +734,16 @@ async fn main() -> anyhow::Result<()> {
         sink: AtomicU8::new(sink.as_u8()),
         dlt_on: AtomicBool::new(dlt_explicit.is_some()),
         errors_on: AtomicBool::new(errors_enabled),
+        parcel_on: AtomicBool::new(parcel_enabled),
+        parcel_max: AtomicU32::new(parcel_cap),
         dlt_port: if dlt.is_some() { dlt_port } else { 0 },
         captured: AtomicU64::new(0),
         emitted: AtomicU64::new(0),
         observed: Mutex::new(BTreeSet::new()),
         filter: Mutex::new(filter),
         errors: Mutex::new(errors_map),
+        parcel: Mutex::new(parcel_map),
+        parcel_max_map: Mutex::new(parcel_max_map),
     });
 
     if let Some(port) = control_port {
@@ -627,7 +752,7 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("bind control server on port {port}"))?;
         println!(
             "bindfetto: control channel on 0.0.0.0:{port} \
-             (STATUS/START/STOP/SINK/DLT/TRACK/LIST/GET/SET/CLEAR)"
+             (STATUS/START/STOP/SINK/DLT/ERRORS/PARCEL/TRACK/LIST/GET/SET/CLEAR)"
         );
     }
 
@@ -652,8 +777,23 @@ async fn main() -> anyhow::Result<()> {
         let mut guard = async_ring.readable_mut().await?;
         let ring = guard.get_inner_mut();
         while let Some(item) = ring.next() {
+            // Two record shapes share the ring (M6): a bare TxEvent, or a variable-length
+            // TxRecord (header + `parcel_len` + that many payload bytes). Tell them apart
+            // by the item's length so the no-parcel path is byte-identical to before.
             let ev: &TxEvent = unsafe { &*(item.as_ptr() as *const TxEvent) };
-            emitter.emit(ev, &mut names);
+            if item.len() > std::mem::size_of::<TxEvent>() {
+                // parcel_len sits right after the TxEvent header; payload follows it.
+                let poff = std::mem::offset_of!(TxRecord, parcel);
+                let parcel_len =
+                    unsafe { *(item.as_ptr().add(std::mem::size_of::<TxEvent>()) as *const u32) }
+                        as usize;
+                // Defensive: never read past what the ring item actually carries.
+                let n = parcel_len.min(item.len().saturating_sub(poff));
+                let parcel = unsafe { std::slice::from_raw_parts(item.as_ptr().add(poff), n) };
+                emitter.emit(ev, Some(parcel), &mut names);
+            } else {
+                emitter.emit(ev, None, &mut names);
+            }
         }
         // Flush the JSONL file once per wakeup so a Ctrl-C loses at most the current
         // (already-drained) batch.
@@ -724,8 +864,10 @@ impl Emitter {
         }
     }
 
-    /// Emit one transaction to every configured sink.
-    fn emit(&mut self, ev: &TxEvent, names: &mut NameCache) {
+    /// Emit one transaction to every configured sink. `parcel` carries the raw captured
+    /// parcel bytes (M6) when payload capture ran for this transaction, else `None`; it
+    /// is rendered as a trailing `parcel=<hex>` token the offline decoder reads.
+    fn emit(&mut self, ev: &TxEvent, parcel: Option<&[u8]>, names: &mut NameCache) {
         self.state.captured.fetch_add(1, Ordering::Relaxed);
         // Master capture gate (`STOP`): drop drained events without emitting.
         if !self.state.capturing.load(Ordering::Relaxed) {
@@ -773,6 +915,14 @@ impl Emitter {
             }
         } else {
             format_core(&mut self.core, ev, names);
+            // Append the raw parcel as a `parcel=<hex>` token so the offline decoder can
+            // unmarshal method arguments. Kept out of the error branch (errors carry no
+            // payload) and off the on-device decode path by design — bytes only.
+            if let Some(bytes) = parcel {
+                use std::fmt::Write as _;
+                let _ = write!(self.core, " parcel={}/{}:", bytes.len(), ev.data_size);
+                push_hex(&mut self.core, bytes);
+            }
         }
         let sink = Sink::from_u8(self.state.sink.load(Ordering::Relaxed));
         if sink.console() {
@@ -816,13 +966,19 @@ impl Emitter {
             }
         }
         if self.jsonl.is_some() {
-            self.write_jsonl(ev, names, errno);
+            self.write_jsonl(ev, parcel, names, errno);
         }
     }
 
     /// Append one JSONL record for `ev` to the file sink. The structured fields let
     /// offline decoders read them directly instead of re-parsing the pretty line.
-    fn write_jsonl(&mut self, ev: &TxEvent, names: &mut NameCache, errno: Option<i32>) {
+    fn write_jsonl(
+        &mut self,
+        ev: &TxEvent,
+        parcel: Option<&[u8]>,
+        names: &mut NameCache,
+        errno: Option<i32>,
+    ) {
         use std::fmt::Write as _;
 
         // Decode the interface into `scratch`; absent for replies / non-AIDL.
@@ -856,6 +1012,13 @@ impl Emitter {
             json_escape(j, &self.scratch);
             j.push('"');
         }
+        // Raw captured parcel bytes (M6) as hex, for offline argument decoding.
+        // `parcel_len` may be < `size` when the payload was truncated at the cap.
+        if let Some(bytes) = parcel {
+            let _ = write!(j, ",\"parcel_len\":{},\"parcel\":\"", bytes.len());
+            push_hex(j, bytes);
+            j.push('"');
+        }
         // Error events carry the human-readable binder return code; decoders can select
         // them on the `error` key (absent for normal transactions). When the concrete
         // failure errno was recovered, add it plus its decoded reason.
@@ -882,6 +1045,16 @@ impl Emitter {
         if let Some(w) = self.jsonl.as_mut() {
             let _ = w.flush();
         }
+    }
+}
+
+/// Append `bytes` to `out` as lowercase hex (two chars per byte, no separators).
+fn push_hex(out: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.reserve(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
     }
 }
 

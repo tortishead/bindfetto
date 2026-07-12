@@ -3,25 +3,81 @@
 
 use std::collections::HashMap;
 
+use serde::Deserialize;
+
+/// One method argument: its parameter name and AIDL type (M6). Carried by the v2
+/// catalog so the offline decoder can unmarshal captured parcel bytes into named values.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Arg {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+}
+
+/// A resolved catalog entry: the method name plus (v2 only) its argument list.
+pub struct Method {
+    pub name: String,
+    pub args: Vec<Arg>,
+}
+
+/// The on-disk shape of a method entry. Back-compatible across catalog versions:
+/// v1 is a bare name string (`"startActivity"`), v2 is an object carrying the arg
+/// types (`{"name":"startActivity","args":[...]}`). The decoder accepts either.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MethodDef {
+    Name(String),
+    Full {
+        name: String,
+        #[serde(default)]
+        args: Vec<Arg>,
+    },
+}
+
+impl From<MethodDef> for Method {
+    fn from(def: MethodDef) -> Self {
+        match def {
+            MethodDef::Name(name) => Method {
+                name,
+                args: Vec::new(),
+            },
+            MethodDef::Full { name, args } => Method { name, args },
+        }
+    }
+}
+
 /// A precompiled AIDL catalog: interface descriptor → (transaction code → method).
 ///
 /// Built by the Track B1 Python catalog builder from a folder of AIDL, reading the
 /// real `TRANSACTION_* = FIRST_CALL_TRANSACTION + N` constants so explicit `= N` ids
-/// are honored. JSON shape:
+/// are honored. JSON shape (v1 name-only, or v2 with arg types):
 ///
 /// ```json
 /// {
-///   "android.app.IActivityManager": { "1": "getTasks", "7": "startActivity" }
+///   "android.app.IActivityManager": {
+///     "1": "getTasks",
+///     "7": { "name": "startActivity", "args": [{ "name": "intent", "type": "Intent" }] }
+///   }
 /// }
 /// ```
 pub struct Catalog {
-    interfaces: HashMap<String, HashMap<u32, String>>,
+    interfaces: HashMap<String, HashMap<u32, Method>>,
 }
 
 impl Catalog {
-    /// Parse a catalog from its JSON representation.
+    /// Parse a catalog from its JSON representation (v1 or v2).
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        let interfaces = serde_json::from_str(json)?;
+        let raw: HashMap<String, HashMap<u32, MethodDef>> = serde_json::from_str(json)?;
+        let interfaces = raw
+            .into_iter()
+            .map(|(iface, methods)| {
+                let m = methods
+                    .into_iter()
+                    .map(|(code, def)| (code, Method::from(def)))
+                    .collect();
+                (iface, m)
+            })
+            .collect();
         Ok(Self { interfaces })
     }
 
@@ -45,7 +101,19 @@ impl Catalog {
     /// Method name for a normal AIDL call, if the `interface` and `code` are known.
     /// Does not cover special transactions — see [`special_transaction`].
     pub fn method(&self, iface: &str, code: u32) -> Option<&str> {
-        self.interfaces.get(iface)?.get(&code).map(String::as_str)
+        self.interfaces
+            .get(iface)?
+            .get(&code)
+            .map(|m| m.name.as_str())
+    }
+
+    /// Argument list for `(interface, code)`, if known and the catalog is v2 (an empty
+    /// slice for a v1 entry or a method with no parameters).
+    pub fn args(&self, iface: &str, code: u32) -> Option<&[Arg]> {
+        self.interfaces
+            .get(iface)?
+            .get(&code)
+            .map(|m| m.args.as_slice())
     }
 }
 

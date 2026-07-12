@@ -22,16 +22,19 @@ use aya_ebpf::{
         bpf_probe_read_user_buf,
     },
     macros::{kprobe, map, tracepoint},
-    maps::{Array, HashMap, RingBuf},
+    maps::{Array, HashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, TracePointContext},
 };
 use bindfetto_common::{
-    is_error_return, IfaceKey, TxEvent, IFACE_HEADER_MAGIC, MAX_IFACE_BYTES,
+    is_error_return, IfaceKey, TxEvent, TxRecord, IFACE_HEADER_MAGIC, MAX_IFACE_BYTES,
+    PARCEL_CEILING,
 };
 
-/// Ring buffer to userspace.
+/// Ring buffer to userspace. Sized for the larger `TxRecord` (header + up to
+/// `PARCEL_CAP` payload bytes) emitted when parcel capture is on (M6), so the drop rate
+/// stays low; a bare `TxEvent` uses only its own bytes of the same ring.
 #[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
 
 /// Per-thread hand-off from the kprobe to the tracepoint, keyed by pid_tgid.
 #[map]
@@ -60,6 +63,29 @@ static ERRORS_ON: Array<u32> = Array::with_max_entries(1, 0);
 #[map]
 static INCLUDE_REPLIES: Array<u32> = Array::with_max_entries(1, 0);
 
+/// One-element enable flag for parcel payload capture (element 0: 0 = off, non-0 = on).
+/// Off by default (M6). When on, a kept transaction's raw parcel bytes (offset 0, up to
+/// [`PARCEL_MAX`]) are staged in [`PARCEL_SCRATCH`] and written to the ring buffer as a
+/// variable-length [`TxRecord`]. Userspace only sets it while the interface filter is
+/// active, so capture is bounded to the selected interfaces — the probe just reads the
+/// flag on the hot path.
+#[map]
+static PARCEL_ON: Array<u32> = Array::with_max_entries(1, 0);
+
+/// One-element runtime cap (bytes) on the captured payload, tunable live via
+/// `--parcel-max` / `PARCEL max`. Clamped by userspace to [`PARCEL_CEILING`]; the probe
+/// clamps again against that constant so the verifier can bound the read. 0 falls back
+/// to no capture (treated as off).
+#[map]
+static PARCEL_MAX: Array<u32> = Array::with_max_entries(1, 0);
+
+/// Per-CPU scratch to assemble a [`TxRecord`] before a variable-length ring write. Lives
+/// in a map (not on the 512-byte BPF stack, and not shared across CPUs) because the
+/// payload can be up to [`PARCEL_CEILING`]. The kernel caps a per-CPU map value at 32 KiB,
+/// which is why the ceiling sits below that.
+#[map]
+static PARCEL_SCRATCH: PerCpuArray<TxRecord> = PerCpuArray::with_max_entries(1, 0);
+
 /// Per-thread copy of the last captured (kept) outgoing transaction, keyed by pid_tgid.
 /// Written by the transaction tracepoint only while error capture is on, and read by the
 /// `binder_return` attach point to correlate a `BR_*_REPLY` failure back to the
@@ -74,11 +100,21 @@ static LAST_TX: HashMap<u64, TxEvent> = HashMap::with_max_entries(10240, 0);
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Stash {
+    /// Sender-side (untagged) userspace pointer to the parcel buffer, handed to the
+    /// tracepoint so it can copy the raw payload straight into the ring slot (M6) — the
+    /// bytes never touch the BPF stack. 0 when the kprobe couldn't read it. Kept first
+    /// (u64) so the trailing u32s leave no interior padding.
+    buf_ptr: u64,
     data_size: u32,
     iface_byte_len: u32,
     /// 1 = emit this transaction, 0 = drop it (interface filter decided in the kprobe,
     /// where the descriptor is available; the tracepoint enforces it).
     keep: u32,
+    /// Explicit, zero-initialized padding: the kprobe copies the whole `Stash` into the
+    /// `STASH` map and the verifier rejects a map read that touches *uninitialized* tail
+    /// padding. Three u32s after the u64 would leave a 4-byte implicit gap before `iface`;
+    /// naming it and zeroing it makes every byte defined.
+    _pad: u32,
     iface: [u8; MAX_IFACE_BYTES],
 }
 
@@ -133,9 +169,11 @@ fn try_kprobe(ctx: &ProbeContext) -> Result<(), i64> {
             & 0x00ff_ffff_ffff_ffff;
 
     let mut stash = Stash {
+        buf_ptr: buf_ptr as u64,
         data_size,
         iface_byte_len: 0,
         keep: 1,
+        _pad: 0,
         iface: [0u8; MAX_IFACE_BYTES],
     };
 
@@ -233,11 +271,14 @@ fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
     // Default keep when there's no stash (kprobe didn't run/insert): drop iff filtering
     // is active, since we then have no descriptor to match against a wanted interface.
     let mut keep = FILTER_ON.get(0).copied().unwrap_or(0) == 0;
+    // Parcel buffer pointer (M6), carried from the kprobe; 0 when unavailable.
+    let mut buf_ptr = 0u64;
     if let Some(stash) = unsafe { STASH.get(&pid_tgid) } {
         ev.data_size = stash.data_size;
         ev.iface_byte_len = stash.iface_byte_len;
         ev.iface = stash.iface;
         keep = stash.keep != 0;
+        buf_ptr = stash.buf_ptr;
     }
     let _ = STASH.remove(&pid_tgid);
 
@@ -254,11 +295,58 @@ fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
         let _ = LAST_TX.insert(&pid_tgid, &ev, 0);
     }
 
+    // Parcel payload capture (M6): only for real transactions we have a buffer pointer
+    // for, and only while enabled. Emits a variable-length TxRecord (header + raw bytes)
+    // instead of a bare TxEvent; the copy is staged in a per-CPU map, never the BPF stack.
+    if reply == 0 && buf_ptr != 0 && PARCEL_ON.get(0).copied().unwrap_or(0) != 0 {
+        let cap = PARCEL_MAX.get(0).copied().unwrap_or(0) as usize;
+        if cap > 0 {
+            emit_with_parcel(&ev, buf_ptr, ev.data_size, cap);
+            return Ok(());
+        }
+    }
+
     if let Some(mut entry) = EVENTS.reserve::<TxEvent>(0) {
         entry.write(ev);
         entry.submit(0);
     }
     Ok(())
+}
+
+/// Stage a [`TxRecord`] in the per-CPU scratch map and emit it to the ring buffer as a
+/// **variable-length** record: `ev` + `parcel_len` + exactly `parcel_len` payload bytes
+/// read from the sender's userspace at `buf_ptr` (parcel offset 0), where `parcel_len =
+/// min(data_size, cap, PARCEL_CEILING)`. Only the captured bytes hit the ring, so a big
+/// cap costs ring space only when a big parcel actually flows. Nothing large touches the
+/// 512-byte BPF stack.
+fn emit_with_parcel(ev: &TxEvent, buf_ptr: u64, data_size: u32, cap: usize) {
+    let Some(rec) = PARCEL_SCRATCH.get_ptr_mut(0) else {
+        return;
+    };
+    // Length actually captured; a local (not re-read from map memory) so the verifier
+    // keeps the `<= PARCEL_CEILING` bound when it sizes the ring write below.
+    let mut plen = 0usize;
+    unsafe {
+        (*rec).ev = *ev;
+        (*rec).parcel_len = 0;
+        // Clamp the runtime cap against the constant ceiling last, so the read length is
+        // bounded by a constant (a reg-vs-reg min alone doesn't propagate the bound).
+        let n = core::cmp::min(core::cmp::min(data_size as usize, cap), PARCEL_CEILING);
+        if n > 0 {
+            // Raw pointer to the payload array — avoid an autoref into the map value.
+            let parcel_ptr = core::ptr::addr_of_mut!((*rec).parcel) as *mut u8;
+            let dst = core::slice::from_raw_parts_mut(parcel_ptr, n);
+            if bpf_probe_read_user_buf(buf_ptr as *const u8, dst).is_ok() {
+                (*rec).parcel_len = n as u32;
+                plen = n;
+            }
+        }
+        // Emit only the header + captured bytes. `plen <= PARCEL_CEILING`, so the total is
+        // within the scratch value the verifier knows the bounds of.
+        let out_len = core::mem::offset_of!(TxRecord, parcel) + plen;
+        let bytes = core::slice::from_raw_parts(rec as *const u8, out_len);
+        let _ = EVENTS.output(bytes, 0);
+    }
 }
 
 /// Return/error path (M5). Fires for every binder return command written back to a

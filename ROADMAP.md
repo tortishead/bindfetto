@@ -41,6 +41,15 @@ done and verified live on an arm64 AVD — see the per-component READMEs for det
   apply/clear the in-kernel filter), **Deploy** (detached `su`/adb launch of the
   daemon). Verified end-to-end on the AVD.
 
+## Track D — parcel payload (`M6`, in progress)
+
+- **M6 — parcel capture.** Raw parcel bytes captured on-device (gated by a `PARCEL_ON`
+  flag, only settable while the interface filter is active; fixed `PARCEL_CAP`, read
+  straight into the ring slot from parcel offset 0, never onto the BPF stack), decoded
+  to named arguments offline: catalog v2 carries per-method arg types, a `ParcelReader`
+  in `decode/` unmarshals them (written once, reused via CLI/C-ABI/WASM). See
+  [SPEC.md](./SPEC.md) "M6 — parcel payload capture".
+
 ## Open / deferred
 
 - **Control channel hardening** — unix-socket + `SO_PEERCRED` (currently TCP/localhost

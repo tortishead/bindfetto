@@ -13,6 +13,19 @@ pub const TF_ONE_WAY: u32 = 0x01;
 /// `ICarWatchdogServiceForSystem` that overflowed the original 128.
 pub const MAX_IFACE_BYTES: usize = 256;
 
+/// Default runtime cap on raw parcel bytes captured per transaction (M6), used unless
+/// the operator raises it (`--parcel-max` / `PARCEL max`). Small so casual capture is
+/// cheap; captured from parcel offset 0 (head + body), so the offline reader
+/// reconstructs descriptor → header → args; bytes past the cap are lost (truncated).
+pub const PARCEL_CAP_DEFAULT: u32 = 256;
+
+/// Hard compile-time ceiling on the parcel cap. The probe stages the payload in a
+/// per-CPU scratch map before a variable-length ring write, and the kernel caps a
+/// per-CPU map value at `PCPU_MIN_UNIT_SIZE` (32 KiB); 30 KiB leaves room for the
+/// [`TxRecord`] header so the scratch value stays under that limit. The runtime cap is
+/// clamped to this, and it's the constant the verifier uses to bound the payload read.
+pub const PARCEL_CEILING: usize = 30 * 1024;
+
 /// Header magic that `Parcel::writeInterfaceToken` writes (`B_PACK_CHARS('S','Y',
 /// 'S','T')`) read back as a little-endian u32. Its presence at parcel offset 8
 /// marks a transaction that begins with an interface descriptor.
@@ -99,8 +112,31 @@ impl TxEvent {
     }
 }
 
+/// A [`TxEvent`] plus a captured slice of the raw parcel (M6). Staged in the probe's
+/// per-CPU scratch map, then written to the ring buffer as a **variable-length** record
+/// (`ev` + `parcel_len` + exactly `parcel_len` payload bytes) *instead of* a bare
+/// `TxEvent` — so the ring only pays for the bytes actually captured, and a big cap
+/// costs nothing when small parcels flow. The consumer tells a record from a bare
+/// `TxEvent` by the ring item's byte length, so the no-parcel path is byte-identical.
+///
+/// `parcel` is sized to the compile-time [`PARCEL_CEILING`]; only the first `parcel_len`
+/// bytes are ever written or emitted.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TxRecord {
+    /// The transaction header — identical to what the no-parcel path emits.
+    pub ev: TxEvent,
+    /// Valid bytes in [`parcel`]; `<= PARCEL_CEILING`. Captured from parcel offset 0.
+    pub parcel_len: u32,
+    /// Raw parcel bytes (head + body), decoded offline against the catalog's arg types.
+    pub parcel: [u8; PARCEL_CEILING],
+}
+
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for TxEvent {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for TxRecord {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for IfaceKey {}

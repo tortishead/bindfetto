@@ -5,5 +5,20 @@
   },
   "android.app.ITaskStackListener": {
     "12": "onTaskMovedToFront"
+  },
+  "test.IFoo": {
+    "1": {
+      "name": "doThing",
+      "args": [
+        { "name": "tag", "type": "String" },
+        { "name": "flags", "type": "int" }
+      ]
+    },
+    "2": {
+      "name": "bind",
+      "args": [
+        { "name": "token", "type": "IBinder" }
+      ]
+    }
   }
 }

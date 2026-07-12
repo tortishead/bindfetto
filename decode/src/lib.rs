@@ -25,15 +25,21 @@
 
 mod catalog;
 pub mod ffi;
+mod parcel;
 mod parse;
 
-pub use catalog::{special_transaction, Catalog};
+pub use catalog::{special_transaction, Arg, Catalog};
 pub use parse::{Label, Record};
 
 use std::borrow::Cow;
 
 /// The token the runtime emits in the method slot: `.[code:<N>]`.
 const CODE_MARK: &str = ".[code:";
+
+/// The token the runtime appends when parcel capture is on (M6):
+/// ` parcel=<captured>/<total>:<hex>`. The decoder renders the bytes into method
+/// arguments and drops the raw token from the line.
+const PARCEL_MARK: &str = " parcel=";
 
 /// A catalog plus the logic to resolve and rewrite transaction codes.
 pub struct Decoder {
@@ -67,11 +73,19 @@ impl Decoder {
     }
 
     /// Rewrite every `interface.[code:N]` token in `line` whose method is known,
-    /// leaving the rest of the line — and any unknown codes — exactly as-is.
+    /// leaving the rest of the line — and any unknown codes — exactly as-is. When the
+    /// line carries a captured parcel (`parcel=<hex>`, M6) and the resolved method has
+    /// known argument types, the arguments are rendered after the method name
+    /// (`method(a=1, b="x")`) and the raw parcel token is dropped from the output.
     ///
     /// Returns [`Cow::Borrowed`] when nothing changed, so a stream of non-bindfetto
     /// lines passes through without allocating.
     pub fn decode_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+        // The captured parcel bytes (decoded once) and the span to strip if we render
+        // them into arguments; `None` when the line carries no parcel token.
+        let parcel = parse_parcel(line);
+        let mut rendered_parcel = false;
+
         let mut out: Option<String> = None;
         // Bytes of `line` already flushed into `out` (only meaningful once `out` is
         // set); everything from here to the next replacement is copied verbatim.
@@ -101,18 +115,80 @@ impl Decoder {
             buf.push_str(iface);
             buf.push('.');
             buf.push_str(method);
+            // Render arguments from the captured parcel, once, for the first method that
+            // has a known non-empty signature.
+            if !rendered_parcel {
+                if let Some(bytes) = parcel.as_ref().map(|p| &p.bytes) {
+                    if let Some(args) = self.catalog.args(iface, code) {
+                        if !args.is_empty() && parcel::render_args(buf, args, bytes) {
+                            rendered_parcel = true;
+                        }
+                    }
+                }
+            }
             copied = code_end; // skip the original ".[code:N]"
             search = code_end;
         }
 
         match out {
             Some(mut buf) => {
-                buf.push_str(&line[copied..]);
+                match (&parcel, rendered_parcel) {
+                    // Rendered the args — drop the now-redundant raw parcel token.
+                    (Some(p), true) => {
+                        buf.push_str(&line[copied..p.start]);
+                        buf.push_str(&line[p.end..]);
+                    }
+                    _ => buf.push_str(&line[copied..]),
+                }
                 Cow::Owned(buf)
             }
             None => Cow::Borrowed(line),
         }
     }
+}
+
+/// A captured parcel token located in a line: the decoded bytes and the `[start, end)`
+/// span of the raw ` parcel=…` token (including its leading space) to strip on render.
+struct Parcel {
+    start: usize,
+    end: usize,
+    bytes: Vec<u8>,
+}
+
+/// Locate and decode a ` parcel=<captured>/<total>:<hex>` token, if present.
+fn parse_parcel(line: &str) -> Option<Parcel> {
+    let start = line.find(PARCEL_MARK)?;
+    let after = &line[start + PARCEL_MARK.len()..];
+    // Skip the "<captured>/<total>:" prefix; the hex payload follows the ':'.
+    let colon = after.find(':')?;
+    let hex = &after[colon + 1..];
+    let hex_len = hex
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(hex.len());
+    let hex = &hex[..hex_len];
+    let end = start + PARCEL_MARK.len() + colon + 1 + hex_len;
+    Some(Parcel {
+        start,
+        end,
+        bytes: decode_hex(hex),
+    })
+}
+
+/// Decode an even-length ASCII hex string to bytes; a trailing half-byte is ignored.
+fn decode_hex(hex: &str) -> Vec<u8> {
+    let b = hex.as_bytes();
+    let mut out = Vec::with_capacity(b.len() / 2);
+    let mut i = 0;
+    while i + 1 < b.len() {
+        let hi = (b[i] as char).to_digit(16);
+        let lo = (b[i + 1] as char).to_digit(16);
+        match (hi, lo) {
+            (Some(h), Some(l)) => out.push((h * 16 + l) as u8),
+            _ => break,
+        }
+        i += 2;
+    }
+    out
 }
 
 /// Parse the `N]` that follows `.[code:`, starting at `at`. Returns the code and the

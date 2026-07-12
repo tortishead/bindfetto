@@ -140,7 +140,63 @@ def _explicit_code(stmt: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def _parse_methods(body: str) -> Methods:
+def _param_list(stmt: str) -> str:
+    """The text between a method statement's outermost `(` and its matching `)`."""
+    open_idx = stmt.find("(")
+    if open_idx == -1:
+        return ""
+    depth = 0
+    for j in range(open_idx, len(stmt)):
+        if stmt[j] == "(":
+            depth += 1
+        elif stmt[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return stmt[open_idx + 1 : j]
+    return ""
+
+
+def _split_params(params: str) -> Iterator[str]:
+    """Split a parameter list on top-level commas, respecting <>, (), [] nesting."""
+    depth = 0
+    buf: list[str] = []
+    for c in params:
+        if c in "<([":
+            depth += 1
+        elif c in ">)]":
+            depth -= 1
+        if c == "," and depth == 0:
+            if "".join(buf).strip():
+                yield "".join(buf).strip()
+            buf = []
+        else:
+            buf.append(c)
+    if "".join(buf).strip():
+        yield "".join(buf).strip()
+
+
+def _parse_param(param: str) -> Optional[Dict[str, str]]:
+    """Turn one parameter (`in @nullable Intent intent`) into {name, type}. The trailing
+    identifier is the name; everything before it (minus direction/annotation words) is the
+    AIDL type, kept as-is so the decoder can classify it."""
+    m = re.search(r"([A-Za-z_]\w*)\s*$", param)
+    if m is None:
+        return None
+    name = m.group(1)
+    type_part = param[: m.start()].strip()
+    # Drop leading direction keywords and annotations; keep the type token(s).
+    type_part = re.sub(r"@\w+(\s*\([^)]*\))?", " ", type_part)
+    type_part = re.sub(r"^\s*(in|out|inout)\b", " ", type_part).strip()
+    if not type_part:
+        return None
+    return {"name": name, "type": type_part}
+
+
+def _parse_args(stmt: str) -> list:
+    return [p for p in (_parse_param(x) for x in _split_params(_param_list(stmt))) if p]
+
+
+def _parse_methods(body: str, with_args: bool = False) -> Methods:
     methods: Methods = {}
     position = 0  # 0-based declaration index among methods only
     for stmt in _top_level_statements(body):
@@ -153,12 +209,12 @@ def _parse_methods(body: str) -> Methods:
         code = _explicit_code(s)
         if code is None:
             code = FIRST_CALL_TRANSACTION + position
-        methods[code] = name
+        methods[code] = {"name": name, "args": _parse_args(s)} if with_args else name
         position += 1
     return methods
 
 
-def _parse_interfaces(src: str) -> Catalog:
+def _parse_interfaces(src: str, with_args: bool = False) -> Catalog:
     package = _package(src)
     out: Catalog = {}
     for m in re.finditer(r"\binterface\s+([A-Za-z_]\w*)", src):
@@ -166,17 +222,17 @@ def _parse_interfaces(src: str) -> Catalog:
         if brace == -1:
             continue
         fq = f"{package}.{m.group(1)}" if package else m.group(1)
-        out[fq] = _parse_methods(_braced_body(src, brace))
+        out[fq] = _parse_methods(_braced_body(src, brace), with_args)
     return out
 
 
 # --- driver ----------------------------------------------------------------------
 
-def build_catalog(sources) -> Catalog:
+def build_catalog(sources, with_args: bool = False) -> Catalog:
     catalog: Catalog = {}
     for _label, text in load_sources(sources):
         text = _strip_annotations(_strip_comments(text))
-        for fq, methods in _parse_interfaces(text).items():
+        for fq, methods in _parse_interfaces(text, with_args).items():
             catalog.setdefault(fq, {}).update(methods)
     return catalog
 
@@ -197,9 +253,14 @@ def main(argv=None) -> int:
         help="local .aidl file(s), directory(ies) to recurse, or http(s) URL(s)",
     )
     ap.add_argument("-o", "--out", help="write JSON here (default: stdout)")
+    ap.add_argument(
+        "--args",
+        action="store_true",
+        help="emit v2 entries with method argument types (for M6 parcel decoding)",
+    )
     args = ap.parse_args(argv)
 
-    catalog = build_catalog(args.sources)
+    catalog = build_catalog(args.sources, with_args=args.args)
     text = to_json(catalog)
 
     methods = sum(len(v) for v in catalog.values())

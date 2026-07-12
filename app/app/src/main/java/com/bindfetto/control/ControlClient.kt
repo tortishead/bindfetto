@@ -56,6 +56,12 @@ class ControlClient(private val host: String, private val port: Int) {
     /** Toggle error capture (`ERRORS on|off`). */
     suspend fun setErrors(on: Boolean): String = simple("ERRORS " + if (on) "on" else "off")
 
+    /** Toggle parcel payload capture (`PARCEL on|off`); needs an active filter, else `ERR`. */
+    suspend fun setParcel(on: Boolean): String = simple("PARCEL " + if (on) "on" else "off")
+
+    /** Set the runtime parcel payload cap in bytes (`PARCEL max <n>`); reply `OK <applied>`. */
+    suspend fun setParcelMax(bytes: Int): String = simple("PARCEL max $bytes")
+
     /** Toggle interface discovery (`TRACK on|off`). */
     suspend fun setTracking(on: Boolean): String = simple("TRACK " + if (on) "on" else "off")
 

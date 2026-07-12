@@ -252,6 +252,91 @@ Still open:
 - **CO-RE portability** across kernels — deferred; the initial dev target is fixed.
 - **Control channel hardening** — unix socket + `SO_PEERCRED` (see Technical decisions).
 
+## M6 — parcel payload capture
+
+The device today reads the parcel only far enough to recover the interface descriptor
+(M3). The method **arguments** — the rest of the parcel — are never captured. M6 adds
+raw parcel-byte capture on the hot path and full argument decoding offline.
+
+**Core principle — the device stays dumb.** The probe copies *raw parcel bytes* and
+nothing more. All structure parsing — header skip, argument marshalling, rendering —
+happens offline in `decode/`, exactly as `(interface, code) → method` already does.
+Logs stay re-decodable against any future Parcel-layout logic or catalog version.
+
+### On-device (`runtime/`)
+
+- **Gated behind a `PARCEL_ON` flag map** (same pattern as `ERRORS_ON`): off = exact
+  current cost, zero payload reads. Flipped live over the control channel.
+- **`PARCEL_ON` is only settable while the interface filter is active** (`FILTER_ON`
+  set + `WANTED` non-empty). Full-device payload capture would multiply ring traffic
+  and observer effect; requiring the filter bounds capture to the few interfaces the
+  operator selected. Enforced in userspace/control, **not** the probe — the hot path
+  just reads the flag. (A raw "≤ N interfaces" cap is a poor proxy — one chatty
+  interface outruns ten quiet ones; filter-required is the real guard. An optional
+  probe-side bytes/sec budget → `parcel_len = 0` backpressure is a later refinement.)
+- **Configurable cap, runtime-tunable.** Default 256 B (`PARCEL_CAP_DEFAULT`) keeps
+  casual capture cheap; the operator raises it with `--parcel-max <bytes>` /
+  `PARCEL max <n>` (live, over the control channel) to inspect a big parcel, accepting
+  the ring/CPU cost. Clamped to a **compile-time ceiling** `PARCEL_CEILING` (30 KiB): the
+  verifier needs a constant bound, and the kernel caps a per-CPU map value at
+  `PCPU_MIN_UNIT_SIZE` (32 KiB), which the scratch buffer must fit under. (64 KiB isn't
+  reachable this way — it would need a fixed 64 KiB ring record, wasteful, or multi-record
+  chunking.) Real arguments (handles, ints, short strings) fit the default; large blobs
+  (Bitmap, buffers) pass as fds/binders, not inline.
+- **Never touch the 512-byte BPF stack with payload.** `Stash` grows only by
+  `buf_ptr: u64` (kept first, with an explicit `_pad`, so the map-inserted struct has no
+  uninitialized padding — the verifier rejects a map read that touches it). Capture happens
+  in the tracepoint: it stages a `TxRecord` in a **per-CPU scratch map** (the payload can
+  reach `PARCEL_CEILING`, too big for the stack), `bpf_probe_read_user_buf`s from `buf_ptr`
+  into it, then writes a **variable-length** record to the ring via `bpf_ringbuf_output` —
+  only `header + parcel_len` bytes. Payload captured from **parcel offset 0** (head + body
+  up to the runtime cap), so the probe needs no understanding of the strict-mode /
+  interface-token header — the offline reader reconstructs descriptor → header → args.
+- **Two record shapes on one ring**, distinguished by item length so the no-parcel path
+  stays byte-identical to today: a bare `TxEvent` (reserve/submit, zero-copy) when parcel
+  capture is off/skipped, or a variable-length `TxRecord { ev, parcel_len, parcel[..] }`
+  when a payload is captured. `TxEvent` itself is unchanged — the header contract holds.
+- **Ring footprint** grows only by the *actually captured* bytes per event (variable
+  length), so a large cap costs ring space only when a large parcel really flows; small
+  parcels stay cheap regardless of the cap. `EVENTS` bumped 256 KB → 1 MB. Cost is memory,
+  not CPU (one extra staging copy, on the parcel path only).
+- **Emit raw only.** No hex-encoding or rendering on device — the consumer appends the
+  captured bytes to the line (`parcel=<captured>/<total>:<hex>`) / `parcel`+`parcel_len`
+  in JSONL.
+
+### Offline (`catalog/` + `decode/`)
+
+- **Catalog v2** — extend each entry from a bare name to name + argument types,
+  back-compatible (decoder accepts both the v1 string and the v2 object):
+  ```json
+  "1": { "name": "acquireWakeLock",
+         "args": [{"name":"lock","type":"IBinder"},
+                  {"name":"flags","type":"int"},
+                  {"name":"tag","type":"String"}] }
+  ```
+  The builder already isolates the `(...)` param list; add type extraction (primitives,
+  `String`, `IBinder`, arrays `T[]`, `List<T>`, `in/out/inout`, `@nullable`). Decoding a
+  parcelable's *fields* is deep and version-sensitive — first cut renders parcelables as
+  raw/hex.
+- **Parcel reader** (`decode/parcel.rs`, written once, reused via CLI / C-ABI / WASM) —
+  a `ParcelReader` over `&[u8]` following Binder marshalling: LE, 4-byte alignment;
+  int32/int64/float/double; `String16` (int32 len, `-1` = null, `(len+1)·2` bytes
+  UTF-16LE, padded to 4); arrays (int32 count + elements); `IBinder`/FD rendered as
+  `<binder>`/`<fd>`. It skips the parcel header (strict-mode + interface token) with the
+  same rules, since the device captured from offset 0. **Truncation-aware**: the payload
+  is capped/partial by design, so it stops at buffer end and marks `…(truncated)`.
+- **Render** — `decode_line` already rewrites `.[code:N]`; extend it to also consume a
+  trailing `parcel=<hex>` token, decode the args, and emit e.g.
+  `IPowerManager.acquireWakeLock(lock=<binder>, flags=1, tag="scr"…), 512B [parcel 64/512B]`.
+  Stays prefix-agnostic (bare / console / DLT / logcat).
+
+### Biggest risk
+
+The argument-start offset — the header `writeInterfaceToken` writes (strict-mode policy,
+work-source, vendor header) is non-trivial and version-dependent. Capturing from offset 0
+pushes that entirely offline, where it's fixable without a device reflash. Unit-test the
+reader against real captured parcels before trusting argument output.
+
 ## Non-goals (initial)
 
 - Not a passive analyzer only — but bindfetto does **not modify or block**

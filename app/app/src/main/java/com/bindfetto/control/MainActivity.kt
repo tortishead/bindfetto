@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -144,6 +146,14 @@ class ControlViewModel : ViewModel() {
 
     fun setErrors(on: Boolean) = run("Errors → $on") { c ->
         val r = c.setErrors(on); refreshStatus(); r
+    }
+
+    fun setParcel(on: Boolean) = run("Parcel → $on") { c ->
+        val r = c.setParcel(on); refreshStatus(); r
+    }
+
+    fun setParcelMax(bytes: Int) = run("Parcel cap → ${bytes}B") { c ->
+        val r = c.setParcelMax(bytes); refreshStatus(); r
     }
 
     // --- Filter tab ------------------------------------------------------------------
@@ -331,6 +341,9 @@ private fun ControlTab(s: UiState, vm: ControlViewModel) {
     val capturing = s.status["capturing"] == "on"
     val dltOn = s.status["dlt"] == "on"
     val errorsOn = s.status["errors"] == "on"
+    val parcelOn = s.status["parcel"] == "on"
+    val parcelMax = s.status["parcel_max"] ?: "256"
+    val filterActive = (s.status["filter"]?.toIntOrNull() ?: 0) > 0
     val sink = s.status["sink"] ?: "console"
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
@@ -400,6 +413,8 @@ private fun ControlTab(s: UiState, vm: ControlViewModel) {
             }
         }
 
+        ParcelSection(s, vm, parcelOn, parcelMax, filterActive)
+
         ElevatedCard {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Counts", style = MaterialTheme.typography.titleSmall,
@@ -408,6 +423,60 @@ private fun ControlTab(s: UiState, vm: ControlViewModel) {
                 StatRow("Captured", s.status["captured"] ?: "—")
                 StatRow("Emitted", s.status["emitted"] ?: "—")
             }
+        }
+    }
+}
+
+/**
+ * Parcel payload capture (M6): a toggle (needs an active filter — the runtime refuses it
+ * otherwise) plus a byte-cap editor. The cap is clamped to the 30 KiB ceiling by the
+ * runtime; the input re-seeds from `parcel_max` whenever the status refreshes.
+ */
+@Composable
+private fun ParcelSection(
+    s: UiState,
+    vm: ControlViewModel,
+    parcelOn: Boolean,
+    parcelMax: String,
+    filterActive: Boolean,
+) {
+    Section("Parcel payload") {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                when {
+                    !filterActive -> "Needs an active filter (set one in Filter)"
+                    parcelOn -> "Capturing up to ${parcelMax}B/txn"
+                    else -> "Off"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Switch(
+                checked = parcelOn,
+                onCheckedChange = { vm.setParcel(it) },
+                enabled = !s.busy && filterActive,
+            )
+        }
+        // Re-seed the editor from the server's value on every status refresh.
+        var capInput by remember(parcelMax) { mutableStateOf(parcelMax) }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = capInput,
+                onValueChange = { capInput = it.filter(Char::isDigit).take(5) },
+                label = { Text("Max bytes (≤ 30720)") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+            )
+            Button(
+                onClick = { capInput.toIntOrNull()?.let(vm::setParcelMax) },
+                enabled = !s.busy && capInput.isNotBlank() && capInput != parcelMax,
+            ) { Text("Set") }
         }
     }
 }

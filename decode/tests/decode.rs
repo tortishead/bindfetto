@@ -115,6 +115,110 @@ fn parses_oneway_reply_and_nonaidl() {
     assert_eq!(rec.label, Label::NonAidl { code: 42 });
 }
 
+// --- M6 parcel argument decoding ------------------------------------------------
+
+/// Append a `String16` (int32 len, chars + null, padded to 4) to a parcel body.
+fn write_string16(out: &mut Vec<u8>, s: &str) {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    out.extend_from_slice(&(units.len() as u32).to_le_bytes());
+    for u in &units {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+    out.extend_from_slice(&0u16.to_le_bytes()); // null terminator
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+}
+
+/// Build a full parcel: the interface-token header (matching the probe's framing) plus
+/// a marshalled argument `body`.
+fn build_parcel(descriptor: &str, body: &[u8]) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&0u32.to_le_bytes()); // strict-mode policy
+    p.extend_from_slice(&0u32.to_le_bytes()); // work-source
+    p.extend_from_slice(&0x5359_5354u32.to_le_bytes()); // 'SYST'
+    let mut header_str = Vec::new();
+    write_string16(&mut header_str, descriptor);
+    // write_string16 wrote the u32 length first; that lives at offset 12 as the token
+    // length, followed by the chars — exactly what seek_args expects.
+    p.extend_from_slice(&header_str);
+    p.extend_from_slice(body);
+    p
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::new();
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+#[test]
+fn renders_parcel_arguments() {
+    let d = decoder();
+    let mut body = Vec::new();
+    write_string16(&mut body, "hi"); // tag = "hi"
+    body.extend_from_slice(&7i32.to_le_bytes()); // flags = 7
+    let parcel = build_parcel("test.IFoo", &body);
+    let line = format!(
+        "a (1) -> b (2): test.IFoo.[code:1], {}B parcel={}/{}:{}",
+        parcel.len(),
+        parcel.len(),
+        parcel.len(),
+        to_hex(&parcel),
+    );
+    assert_eq!(
+        d.decode_line(&line),
+        format!(
+            "a (1) -> b (2): test.IFoo.doThing(tag=\"hi\", flags=7), {}B",
+            parcel.len()
+        )
+    );
+}
+
+#[test]
+fn marks_truncated_parcel() {
+    let d = decoder();
+    let mut body = Vec::new();
+    write_string16(&mut body, "hi");
+    // flags int omitted → the reader runs out mid-signature.
+    let parcel = build_parcel("test.IFoo", &body);
+    let line = format!(
+        "a (1) -> b (2): test.IFoo.[code:1], 999B parcel={}/999:{}",
+        parcel.len(),
+        to_hex(&parcel),
+    );
+    assert_eq!(
+        d.decode_line(&line),
+        "a (1) -> b (2): test.IFoo.doThing(tag=\"hi\", …(truncated)), 999B"
+    );
+}
+
+#[test]
+fn stops_at_unparsable_type() {
+    let d = decoder();
+    // code 2 = bind(token: IBinder) — no fixed layout, so decoding stops immediately.
+    let parcel = build_parcel("test.IFoo", &[]);
+    let line = format!(
+        "a (1) -> b (2): test.IFoo.[code:2], 8B parcel={}/8:{}",
+        parcel.len(),
+        to_hex(&parcel),
+    );
+    assert_eq!(
+        d.decode_line(&line),
+        "a (1) -> b (2): test.IFoo.bind(token=<IBinder>, …(unparsed)), 8B"
+    );
+}
+
+#[test]
+fn parcel_token_kept_when_method_unknown() {
+    let d = decoder();
+    // Unknown code: no method, so the parcel token passes through untouched.
+    let line = "a (1) -> b (2): test.IFoo.[code:99], 8B parcel=4/8:deadbeef";
+    assert_eq!(d.decode_line(line), line);
+}
+
 #[test]
 fn parses_endpoint_paths_with_slashes() {
     let core =
