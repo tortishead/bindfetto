@@ -131,12 +131,13 @@ const OFF_FLAGS: usize = 32;
 const OFF_RETURN_CMD: usize = 8; // uint32_t cmd
 
 // --- struct binder_transaction_data offsets (UAPI, 64-bit) ---
+// data_size (+32), offsets_size (+40) and data.ptr.buffer (+48) are read as one
+// contiguous [u64; 3] starting here.
 const TR_DATA_SIZE: usize = 32; // binder_size_t data_size
-const TR_BUFFER_PTR: usize = 48; // data.ptr.buffer (user pointer)
 
 // --- parcel head layout written by writeInterfaceToken ---
-const P_MAGIC: usize = 8; // int32 kHeader ('SYST')
-const P_STRLEN: usize = 12; // int32 length in UTF-16 code units
+// magic (+8) and the UTF-16 code-unit count (+12) are read as one u64 at P_MAGIC.
+const P_MAGIC: usize = 8; // int32 kHeader ('SYST'), strlen in the high half
 const P_STR: usize = 16; // start of the UTF-16LE descriptor
 
 #[kprobe]

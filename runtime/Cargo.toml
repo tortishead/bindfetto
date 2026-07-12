@@ -6,8 +6,8 @@
 # Android target — the eBPF crate is compiled separately for bpfel-unknown-none.
 [workspace]
 resolver = "2"
-members = ["bindfetto", "bindfetto-common", "bindfetto-ebpf"]
-default-members = ["bindfetto", "bindfetto-common"]
+members = ["bindfetto", "bindfetto-common", "bindfetto-core", "bindfetto-ebpf"]
+default-members = ["bindfetto", "bindfetto-common", "bindfetto-core"]
 
 [workspace.package]
 version = "0.1.0"

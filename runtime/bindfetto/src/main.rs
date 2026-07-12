@@ -29,8 +29,6 @@
 //! `failed_transaction_log` — the *concrete* failure errno (e.g. `-ENOSPC` = the target's
 //! binder buffer is full). `--include-replies` additionally keeps normal replies.
 
-mod dlt_wire;
-
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{BufWriter, Write as _};
@@ -43,9 +41,12 @@ use aya::{
     programs::{KProbe, TracePoint},
     Ebpf,
 };
-use bindfetto_common::{
-    IfaceKey, TxEvent, TxRecord, BR_DEAD_REPLY, BR_FAILED_REPLY, BR_FROZEN_REPLY, MAX_IFACE_BYTES,
-    PARCEL_CAP_DEFAULT, PARCEL_CEILING,
+use bindfetto_common::{IfaceKey, TxEvent, TxRecord, PARCEL_CAP_DEFAULT, PARCEL_CEILING};
+// `dlt as dlt_wire`: the consumer's own `mod dlt` is the TCP server; the core module is
+// the wire encoder it feeds.
+use bindfetto_core::{
+    br_error_name, dlt as dlt_wire, errno_reason, iface_key, json_escape, push_hex,
+    write_iface_bytes,
 };
 use tokio::io::unix::AsyncFd;
 
@@ -159,25 +160,6 @@ fn iface_filters(args: &[String]) -> Vec<String> {
         }
     }
     out
-}
-
-/// Build the in-kernel filter key for an interface name: its UTF-16LE bytes,
-/// zero-padded to [`MAX_IFACE_BYTES`] — byte-identical to what the probe captures
-/// into `TxEvent::iface`, so a direct map lookup matches. Names longer than the
-/// buffer are truncated (the probe truncates the same way).
-fn iface_key(name: &str) -> IfaceKey {
-    let mut key = [0u8; MAX_IFACE_BYTES];
-    let mut i = 0;
-    for unit in name.encode_utf16() {
-        if i + 2 > MAX_IFACE_BYTES {
-            break;
-        }
-        let [lo, hi] = unit.to_le_bytes();
-        key[i] = lo;
-        key[i + 1] = hi;
-        i += 2;
-    }
-    IfaceKey(key)
 }
 
 /// Minimal binding to Android's liblog for the logcat sink.
@@ -1048,37 +1030,6 @@ impl Emitter {
     }
 }
 
-/// Append `bytes` to `out` as lowercase hex (two chars per byte, no separators).
-fn push_hex(out: &mut String, bytes: &[u8]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    out.reserve(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-}
-
-/// Append `s` to `out` as the interior of a JSON string (no surrounding quotes),
-/// escaping per RFC 8259.
-fn json_escape(out: &mut String, s: &str) {
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                use std::fmt::Write as _;
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-}
-
 /// Write `src (pid) -> dst (pid): <label>` into `out`, where `<label>` is the interface
 /// + raw code, a reply marker, or a non-AIDL marker. Shared by the transaction line
 /// ([`format_core`]) and the error line ([`format_error`]).
@@ -1118,15 +1069,6 @@ fn format_error(out: &mut String, ev: &TxEvent, names: &mut NameCache) {
 }
 
 /// Human-readable name for a captured binder return error code.
-fn br_error_name(code: u32) -> &'static str {
-    match code {
-        BR_DEAD_REPLY => "BR_DEAD_REPLY",
-        BR_FAILED_REPLY => "BR_FAILED_REPLY",
-        BR_FROZEN_REPLY => "BR_FROZEN_REPLY",
-        _ => "BR_ERROR",
-    }
-}
-
 /// Reader for the kernel's binder `failed_transaction_log`. The coarse `BR_FAILED_REPLY`
 /// code doesn't say *why* a transaction failed; the driver records the concrete errno as
 /// `return_error_param` in this ring of the last ~32 failures. We match an error event to
@@ -1176,46 +1118,13 @@ impl FailedTxLog {
                 self.cache.clear();
             }
             for line in content.lines() {
-                if let Some((id, errno)) = Self::parse_entry(line) {
+                if let Some((id, errno)) = bindfetto_core::parse_failed_tx_entry(line) {
                     self.cache.insert(id, errno);
                 }
             }
         }
         self.cache.get(&debug_id).copied()
     }
-
-    /// Parse one log line into `(debug_id, errno)`. Each line looks like:
-    /// `<id>: call from A:B to C:D context <ctx> … ret <return_error>/<param> l=<line>`.
-    fn parse_entry(line: &str) -> Option<(i32, i32)> {
-        // The debug id is the leading `<id>:` token; a later `from A:B` also contains ':',
-        // so split on the first one only.
-        let (id_tok, rest) = line.split_once(':')?;
-        let id = id_tok.trim().parse::<i32>().ok()?;
-        // `ret <return_error>/<param>` — the param after the slash is the errno.
-        let after = rest.split(" ret ").nth(1)?;
-        let tok = after.split_whitespace().next()?;
-        let (_, param) = tok.split_once('/')?;
-        let errno = param.parse::<i32>().ok()?;
-        Some((id, errno))
-    }
-}
-
-/// Human-readable cause for a binder failure errno (`return_error_param`). Covers the
-/// causes seen in practice; unknown codes fall back to the bare number at the call site.
-fn errno_reason(errno: i32) -> Option<&'static str> {
-    Some(match errno {
-        -28 => "target buffer full",     // ENOSPC
-        -3 => "dead node",               // ESRCH
-        -22 => "invalid transaction",    // EINVAL
-        -1 => "operation not permitted", // EPERM
-        -13 => "permission denied",      // EACCES (often SELinux)
-        -9 => "bad file descriptor",     // EBADF
-        -14 => "fault copying data",     // EFAULT
-        -12 => "out of memory",          // ENOMEM
-        -11 => "would block",            // EAGAIN
-        -110 => "timed out",             // ETIMEDOUT
-        _ => return None,
-    })
 }
 
 /// Nanoseconds to add to a `CLOCK_MONOTONIC` timestamp to get `CLOCK_REALTIME`
@@ -1248,25 +1157,11 @@ fn write_timestamp(out: &mut String, ts_ns: u64, boot_offset_ns: i128) {
     }
 }
 
-/// Decode the event's UTF-16LE interface descriptor and append it to `out`.
-/// Returns false (writing nothing) when the event carries no usable descriptor.
+/// Decode the event's UTF-16LE interface descriptor and append it to `out`. Returns false
+/// (writing nothing) when the event carries no usable descriptor. Thin wrapper over
+/// [`bindfetto_core::write_iface_bytes`] with the event's captured buffer.
 fn write_iface(out: &mut String, ev: &TxEvent) -> bool {
-    let len = ev.iface_byte_len as usize;
-    if len == 0 || len > ev.iface.len() {
-        return false;
-    }
-    let units = ev.iface[..len]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]));
-    let start = out.len();
-    for ch in char::decode_utf16(units) {
-        match ch {
-            Ok('\0') => break, // NUL-terminated descriptor: stop at the first NUL
-            Ok(c) => out.push(c),
-            Err(_) => out.push('\u{FFFD}'),
-        }
-    }
-    out.len() != start
+    write_iface_bytes(out, &ev.iface, ev.iface_byte_len as usize)
 }
 
 /// pid -> process name, cached (a pid's name is stable for its lifetime).

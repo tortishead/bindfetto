@@ -185,6 +185,7 @@ dependencies = [
  "aya-build",
  "aya-log",
  "bindfetto-common",
+ "bindfetto-core",
  "chrono",
  "libc",
  "tokio",
@@ -195,6 +196,13 @@ name = "bindfetto-common"
 version = "0.1.0"
 dependencies = [
  "aya",
+]
+
+[[package]]
+name = "bindfetto-core"
+version = "0.1.0"
+dependencies = [
+ "bindfetto-common",
 ]
 
 [[package]]

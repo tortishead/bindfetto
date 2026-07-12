@@ -1,0 +1,12 @@
+[package]
+name = "bindfetto-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Plain `std`, no `aya`/Android deps, so the consumer's pure logic (DLT wire encode,
+# interface-key building, UTF-16 descriptor decode, JSONL escaping, error/errno decode,
+# kernel-log parsing) can be unit-tested on the host. The consumer links this and keeps
+# only the platform-bound glue (aya, /proc, liblog, chrono).
+[dependencies]
+bindfetto-common = { path = "../bindfetto-common" }

@@ -39,11 +39,12 @@ skip() { printf '\n\033[1m== %s ==\033[0m\n(skipped: %s)\n' "$1" "$2"; results+=
 
 # --- Rust: decode core + wire contract ------------------------------------------------
 if have cargo; then
-  run "decode (Rust)"        bash -c 'cd decode && cargo test --quiet'
-  run "wire contract (Rust)" bash -c 'cd runtime && cargo test --quiet -p bindfetto-common'
+  run "decode (Rust)"          bash -c 'cd decode && cargo test --quiet'
+  # -p by name: a bare `cargo test` here would also pull in the Android-only consumer.
+  run "wire + core (Rust)"     bash -c 'cd runtime && cargo test --quiet -p bindfetto-common -p bindfetto-core'
 else
   skip "decode (Rust)" "cargo not found"
-  skip "wire contract (Rust)" "cargo not found"
+  skip "wire + core (Rust)" "cargo not found"
 fi
 
 # --- Python: catalog builder ----------------------------------------------------------

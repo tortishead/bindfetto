@@ -71,3 +71,53 @@ pub fn id4(s: &str) -> [u8; 4] {
     id[..n].copy_from_slice(&b[..n]);
     id
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id4_pads_and_truncates() {
+        assert_eq!(id4("BFTO"), *b"BFTO");
+        assert_eq!(id4("AB"), [b'A', b'B', 0, 0]);
+        assert_eq!(id4("TOOLONG"), *b"TOOL");
+        assert_eq!(id4(""), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn encode_round_trips_header_and_payload() {
+        let mut out = Vec::new();
+        encode(&mut out, 0x2a, 0x0001_0000, b"BFTO", b"BIND", b"BIND", "hi");
+
+        // HTYP: UEH|MSBF|WEID|WTMS|VERS1 = 0x37.
+        assert_eq!(out[0], 0x37);
+        assert_eq!(out[1], 0x2a); // message counter
+
+        // LEN (big-endian) equals the whole message.
+        let len = u16::from_be_bytes([out[2], out[3]]) as usize;
+        assert_eq!(len, out.len());
+        // std(12) + ext(10) + payload(type-info 4 + len 2 + "hi" 2 + NUL 1) = 31.
+        assert_eq!(len, 31);
+
+        assert_eq!(&out[4..8], b"BFTO"); // ECU id
+        assert_eq!(u32::from_be_bytes([out[8], out[9], out[10], out[11]]), 0x0001_0000);
+
+        // Extended header: MSIN verbose+LOG+INFO, then noar=1, apid, ctid.
+        assert_eq!(out[12], MSIN_VERBOSE | MSIN_TYPE_LOG | MSIN_LEVEL_INFO);
+        assert_eq!(out[13], 1);
+        assert_eq!(&out[14..18], b"BIND");
+        assert_eq!(&out[18..22], b"BIND");
+
+        // Payload: STRG|UTF8 type-info, string length incl. NUL, "hi\0".
+        assert_eq!(u32::from_be_bytes([out[22], out[23], out[24], out[25]]), TYPE_INFO_STRG_UTF8);
+        assert_eq!(u16::from_be_bytes([out[26], out[27]]), 3); // "hi" + NUL
+        assert_eq!(&out[28..], b"hi\0");
+    }
+
+    #[test]
+    fn encode_clears_prior_contents() {
+        let mut out = vec![0xff; 100];
+        encode(&mut out, 0, 0, b"ECU1", b"AP01", b"CT01", "x");
+        assert_eq!(u16::from_be_bytes([out[2], out[3]]) as usize, out.len());
+    }
+}
