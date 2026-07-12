@@ -61,11 +61,19 @@ adb root && adb shell setenforce 0                 # BPF load is SELinux-gated
 adb push target/aarch64-linux-android/release/bindfetto /data/local/tmp/
 adb shell /data/local/tmp/bindfetto                # run as root
 
+./run-tests.sh                 # all host suites: decode + wire contract + catalog + wasm
 cargo test                     # decode/  (host build; also produces the .a + C header)
+cargo test -p bindfetto-common # runtime/ wire-contract layout invariants (host build)
 python3 -m unittest discover -s tests -v   # catalog/
 npm install && npm run build:wasm && npm run compile && npm run smoke   # plugins/vscode/
 ./gradlew :app:assembleDebug   # app/ (needs JDK 17; build runtime first to bundle the binary)
 ```
+
+Test coverage splits by what's host-runnable: `./run-tests.sh` covers the decode core,
+the `bindfetto-common` wire contract, the catalog builder, and the VS Code WASM path. The
+**eBPF probe** (only the kernel verifier accepts it) and the **consumer** (`aya` is
+Linux-only, links Android liblog, reads `/proc`) build only for the Android target and are
+verified live on the AVD; the app and DLT plugin are driven on-device.
 
 Runtime CLI flags: `--sink console|logcat|both|none`, `--jsonl <path>`,
 `--dlt-serve [port]` (3490), `--iface <name>` (repeatable, exact match), `--errors [on|off]`,

@@ -1,4 +1,5 @@
-#![no_std]
+// `no_std` for the probe/consumer builds; the test build pulls in `std` for the harness.
+#![cfg_attr(not(test), no_std)]
 
 //! Shared data contract between the eBPF probe and the userspace consumer.
 //!
@@ -140,3 +141,83 @@ unsafe impl aya::Pod for TxRecord {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for IfaceKey {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::{align_of, offset_of, size_of};
+
+    // The probe copies whole `#[repr(C)]` structs into BPF maps / the ring buffer, and
+    // the verifier rejects reads of uninitialized padding — so any *implicit* tail or
+    // interior padding is a load-time failure (it bit M5 and M6 twice). These assert the
+    // structs are gap-free by checking the size equals the sum of the field sizes.
+
+    #[test]
+    fn tx_event_has_no_padding() {
+        // u64 + ten u32 + [u8; 256].
+        assert_eq!(size_of::<TxEvent>(), 8 + 10 * 4 + MAX_IFACE_BYTES);
+        assert_eq!(align_of::<TxEvent>(), 8);
+        // 8-aligned size (the post-`ts_ns` u32 count is kept even on purpose).
+        assert_eq!(size_of::<TxEvent>() % 8, 0);
+    }
+
+    #[test]
+    fn tx_record_layout_matches_consumer_reader() {
+        // The consumer reads `parcel_len` at `size_of::<TxEvent>()` and the payload at
+        // `offset_of!(TxRecord, parcel)`; these must hold or it decodes garbage.
+        assert_eq!(offset_of!(TxRecord, ev), 0);
+        assert_eq!(offset_of!(TxRecord, parcel_len), size_of::<TxEvent>());
+        assert_eq!(offset_of!(TxRecord, parcel), size_of::<TxEvent>() + 4);
+        // No interior padding between the header and the payload array.
+        assert_eq!(offset_of!(TxRecord, parcel), 8 + 10 * 4 + MAX_IFACE_BYTES + 4);
+    }
+
+    #[test]
+    fn parcel_scratch_fits_the_per_cpu_limit() {
+        // The probe stages a whole `TxRecord` in a per-CPU map, whose value the kernel
+        // caps at PCPU_MIN_UNIT_SIZE (32 KiB). The ceiling must leave room for the header.
+        assert!(size_of::<TxRecord>() <= 32 * 1024);
+        assert_eq!(PARCEL_CEILING, 30 * 1024);
+    }
+
+    #[test]
+    fn iface_key_is_transparent_over_the_descriptor() {
+        // The probe reinterprets the captured descriptor bytes as an IfaceKey in place;
+        // that's only sound if they're the same size and alignment.
+        assert_eq!(size_of::<IfaceKey>(), MAX_IFACE_BYTES);
+        assert_eq!(align_of::<IfaceKey>(), 1);
+    }
+
+    #[test]
+    fn oneway_and_error_predicates() {
+        let mut ev: TxEvent = unsafe { core::mem::zeroed() };
+        assert!(!ev.is_oneway() && !ev.is_error());
+        ev.flags = TF_ONE_WAY;
+        assert!(ev.is_oneway());
+        ev.err_code = BR_FAILED_REPLY;
+        assert!(ev.is_error());
+    }
+
+    #[test]
+    fn error_return_codes_classified() {
+        for c in [BR_DEAD_REPLY, BR_FAILED_REPLY, BR_FROZEN_REPLY] {
+            assert!(is_error_return(c));
+        }
+        // A normal reply / an unrelated return cmd is not an error.
+        assert!(!is_error_return(0));
+        assert!(!is_error_return(0x7200)); // BR_ERROR base, not one we surface
+    }
+
+    #[test]
+    fn header_magic_matches_b_pack_chars() {
+        // B_PACK_CHARS('S','Y','S','T') = (S<<24)|(Y<<16)|(S<<8)|T as a u32 fourcc.
+        let packed = ((b'S' as u32) << 24) | ((b'Y' as u32) << 16) | ((b'S' as u32) << 8) | b'T' as u32;
+        assert_eq!(IFACE_HEADER_MAGIC, packed);
+        assert_eq!(IFACE_HEADER_MAGIC, 0x5359_5354);
+    }
+
+    #[test]
+    fn default_cap_within_ceiling() {
+        assert!(PARCEL_CAP_DEFAULT as usize <= PARCEL_CEILING);
+    }
+}
