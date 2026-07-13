@@ -258,7 +258,7 @@ output. (Alternatively, drop `plugins/dlt/` into the dlt-viewer source tree unde
 ```sh
 cd decode && cargo build --release        # produces libbindfetto_decode.a
 cd ../plugins/dlt
-cmake -B build -DDLT_VIEWER_DIR=/path/to/dlt-viewer   # a built dlt-viewer checkout
+cmake -B build -DDLT_VIEWER_DIR=/path/to/dlt-viewer   # a dlt-viewer checkout
 cmake --build build
 ```
 
