@@ -87,6 +87,17 @@ pub fn json_escape(out: &mut String, s: &str) {
     }
 }
 
+/// Decode a captured `comm` (kernel task name: NUL-padded, ≤ 15 chars) into a name.
+/// `None` when it's empty/all-zero (no comm was captured). Used as the fallback name for
+/// a sender that has already exited by the time `/proc/<pid>` is read.
+pub fn comm_name(comm: &[u8]) -> Option<String> {
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+    if end == 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&comm[..end]).into_owned())
+}
+
 /// The human-readable name for a binder return `cmd` bindfetto reports as an error.
 pub fn br_error_name(code: u32) -> &'static str {
     match code {
@@ -219,6 +230,17 @@ mod tests {
     }
 
     // --- error / errno decode --------------------------------------------------------
+
+    #[test]
+    fn comm_name_reads_to_nul() {
+        assert_eq!(comm_name(b"am\0\0\0\0\0\0"), Some("am".to_string()));
+        assert_eq!(comm_name(b"binder:1234_5\0\0\0"), Some("binder:1234_5".to_string()));
+        // Full 16 bytes with no NUL (kernel truncates comm to 15+NUL, but be safe).
+        assert_eq!(comm_name(b"0123456789abcde"), Some("0123456789abcde".to_string()));
+        // Empty / all-zero → no name.
+        assert_eq!(comm_name(&[0u8; 16]), None);
+        assert_eq!(comm_name(b""), None);
+    }
 
     #[test]
     fn br_error_names() {

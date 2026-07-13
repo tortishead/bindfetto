@@ -97,6 +97,12 @@ pub struct TxEvent {
     pub iface_byte_len: u32,
     /// Interface descriptor as raw UTF-16LE bytes, decoded by the consumer.
     pub iface: [u8; MAX_IFACE_BYTES],
+    /// The sender's `comm` (kernel task name, NUL-padded, ≤ 15 chars) captured *in the
+    /// probe* via `bpf_get_current_comm()` while the sender is alive mid-transaction.
+    /// Lets the consumer name a short-lived sender that has already exited by the time it
+    /// reads `/proc/<pid>` — the exit race the userspace resolver can't win. All-zero when
+    /// unavailable (e.g. error events reconstructed from a correlated record).
+    pub src_comm: [u8; 16],
 }
 
 impl TxEvent {
@@ -154,8 +160,8 @@ mod tests {
 
     #[test]
     fn tx_event_has_no_padding() {
-        // u64 + ten u32 + [u8; 256].
-        assert_eq!(size_of::<TxEvent>(), 8 + 10 * 4 + MAX_IFACE_BYTES);
+        // u64 + ten u32 + [u8; 256] + [u8; 16].
+        assert_eq!(size_of::<TxEvent>(), 8 + 10 * 4 + MAX_IFACE_BYTES + 16);
         assert_eq!(align_of::<TxEvent>(), 8);
         // 8-aligned size (the post-`ts_ns` u32 count is kept even on purpose).
         assert_eq!(size_of::<TxEvent>() % 8, 0);
@@ -169,7 +175,7 @@ mod tests {
         assert_eq!(offset_of!(TxRecord, parcel_len), size_of::<TxEvent>());
         assert_eq!(offset_of!(TxRecord, parcel), size_of::<TxEvent>() + 4);
         // No interior padding between the header and the payload array.
-        assert_eq!(offset_of!(TxRecord, parcel), 8 + 10 * 4 + MAX_IFACE_BYTES + 4);
+        assert_eq!(offset_of!(TxRecord, parcel), 8 + 10 * 4 + MAX_IFACE_BYTES + 16 + 4);
     }
 
     #[test]

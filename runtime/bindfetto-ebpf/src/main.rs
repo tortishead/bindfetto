@@ -20,8 +20,8 @@
 
 use aya_ebpf::{
     helpers::{
-        bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_user,
-        bpf_probe_read_user_buf,
+        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_kernel,
+        bpf_probe_read_user, bpf_probe_read_user_buf,
     },
     macros::{kprobe, map, tracepoint},
     maps::{Array, HashMap, PerCpuArray, RingBuf},
@@ -287,6 +287,9 @@ fn try_tracepoint(ctx: &TracePointContext) -> Result<(), i64> {
         debug_id: tp_read::<i32>(ctx, OFF_DEBUG_ID),
         iface_byte_len: 0,
         iface: [0u8; MAX_IFACE_BYTES],
+        // Sender's name captured while it's alive mid-transaction, so a short-lived
+        // sender that exits before the consumer reads /proc still gets named.
+        src_comm: bpf_get_current_comm().unwrap_or([0u8; 16]),
     };
     // Parcel buffer pointer (M6), carried from the kprobe; 0 when unavailable.
     let mut buf_ptr = 0u64;
@@ -414,6 +417,8 @@ fn try_return(ctx: &TracePointContext) -> Result<(), i64> {
         debug_id: last.debug_id,
         iface_byte_len: last.iface_byte_len,
         iface: last.iface,
+        // The failing thread is the sender, so its live comm still names the source.
+        src_comm: bpf_get_current_comm().unwrap_or([0u8; 16]),
     };
     // One failure per transaction: drop the record so a later unrelated return on this
     // thread can't re-attribute the same call.

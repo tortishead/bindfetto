@@ -45,7 +45,7 @@ use bindfetto_common::{IfaceKey, TxEvent, TxRecord, PARCEL_CAP_DEFAULT, PARCEL_C
 // `dlt as dlt_wire`: the consumer's own `mod dlt` is the TCP server; the core module is
 // the wire encoder it feeds.
 use bindfetto_core::{
-    br_error_name, dlt as dlt_wire, errno_reason, iface_key, json_escape, push_hex,
+    br_error_name, comm_name, dlt as dlt_wire, errno_reason, iface_key, json_escape, push_hex,
     write_iface_bytes,
 };
 use tokio::io::unix::AsyncFd;
@@ -970,7 +970,7 @@ impl Emitter {
         self.scratch.clear();
         let has_iface = write_iface(&mut self.scratch, ev);
 
-        names.ensure(ev.src_pid);
+        names.ensure_with_comm(ev.src_pid, &ev.src_comm);
         names.ensure(ev.dst_pid);
         let src = names.lookup(ev.src_pid);
         let dst = names.lookup(ev.dst_pid);
@@ -1038,7 +1038,7 @@ impl Emitter {
 /// ([`format_core`]) and the error line ([`format_error`]).
 fn write_label(out: &mut String, ev: &TxEvent, names: &mut NameCache) {
     use std::fmt::Write as _;
-    names.ensure(ev.src_pid);
+    names.ensure_with_comm(ev.src_pid, &ev.src_comm);
     names.ensure(ev.dst_pid);
     let src = names.lookup(ev.src_pid);
     let dst = names.lookup(ev.dst_pid);
@@ -1178,12 +1178,26 @@ impl NameCache {
     /// would keep mislabeling a pid that later became — or already is — resolvable. A
     /// genuinely resolved name is stable for the pid's lifetime, so it's cached once.
     fn ensure(&mut self, pid: u32) {
+        self.ensure_with_comm(pid, &[0u8; 16]);
+    }
+
+    /// Like [`ensure`], but when `/proc` resolution fails (a short-lived sender that
+    /// already exited), fall back to `comm` — the sender's name the probe captured live
+    /// in-kernel — instead of the bare `pid:<n>`. `comm` all-zero means none was captured
+    /// (e.g. the destination pid, which has no in-kernel comm).
+    fn ensure_with_comm(&mut self, pid: u32, comm: &[u8; 16]) {
         let unresolved = match self.0.get(&pid) {
             None => true,
             Some(name) => is_pid_fallback(name, pid),
         };
         if unresolved {
-            let name = resolve_name(pid);
+            let mut name = resolve_name(pid);
+            // /proc failed (process gone) but we captured the sender's name in the probe.
+            if is_pid_fallback(&name, pid) {
+                if let Some(from_comm) = comm_name(comm) {
+                    name = from_comm;
+                }
+            }
             if name_debug() {
                 let cached = self.0.get(&pid).map(String::as_str);
                 eprintln!("[names] pid {pid}: resolve (was {cached:?}) -> {name:?}");
