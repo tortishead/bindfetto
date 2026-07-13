@@ -19,7 +19,8 @@ This is the plugin-agnostic core the SPEC calls for. The CLI, the DLT Viewer plu
 | Item | Role |
 |---|---|
 | `Decoder` / `Catalog` (`lib.rs`, `catalog.rs`) | Catalog load + `(interface, code) → method`. |
-| `Decoder::decode_line` | Rewrite `interface.[code:N]` tokens in a line, in place. Prefix-agnostic (works with a console timestamp, the `BINDFETTO` marker, or logcat/DLT wrapping) and leaves unknown codes and non-bindfetto lines untouched. |
+| `Decoder::decode_line` | Rewrite `interface.[code:N]` tokens in a line, in place. Prefix-agnostic (works with a console timestamp, the `BINDFETTO` marker, or logcat/DLT wrapping) and leaves unknown codes and non-bindfetto lines untouched. When the line carries a captured `parcel=<hex>` token (runtime `--parcel`) and the catalog is v2 (has argument types), it renders the method arguments: `method(a=1, b="x")`. |
+| `ParcelReader` / `render_args` (`parcel.rs`) | Unmarshal captured parcel bytes into arguments (M6). Binder marshalling (LE, 4-byte align): int/long/float/double/`String16`, truncation-aware (`…(truncated)` past the cap). Types with no fixed layout — binders, arrays, parcelables — stop decoding with `<Type>, …(unparsed)`. Needs a v2 catalog (build with `bindfetto_catalog.py --args`). |
 | `Record` / `Label` (`parse.rs`) | Structured field-level parse, for tools that want `src/dst/pid/size/oneway`. |
 | `bindfetto-decode` (`main.rs`) | stdin→stdout / file CLI adapter. |
 

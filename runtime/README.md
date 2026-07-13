@@ -122,13 +122,30 @@ offline against the AIDL catalog — a later milestone.
 | `--dlt-serve [port]` | Be a DLT TCP server (default 3490); DLT Viewer connects as a TCP ECU for live trace. |
 | `--iface <name>` | **In-kernel** interface filter: keep only these descriptors, dropping the rest in the probe before the ring buffer. Repeatable and comma-separated (`--iface a.b.IFoo --iface a.c.IBar,a.c.IBaz`). Match is exact (full descriptor), so `IVehicle` does not match `IVehicleCallback`. While a filter is active, transactions with no interface token (replies already excluded, special/native transactions) also drop. |
 | `--errors [on\|off]` | Capture transaction errors (`BR_FAILED_REPLY`/`BR_DEAD_REPLY`/`BR_FROZEN_REPLY`) via a second `binder:binder_return` attach point, off by default. Each error names the failing source → target, interface and method, and (best-effort) the concrete errno decoded from the kernel `failed_transaction_log`. Toggleable live over the control channel. |
+| `--parcel [on\|off]` | Capture the raw parcel payload (method arguments), off by default. Only honored while an interface filter is active (`--iface`), so capture stays bounded to the selected interfaces. The device emits raw bytes as a `parcel=<captured>/<total>:<hex>` token / a `parcel` field in JSONL; arguments are decoded **offline** (see below). Toggleable live over the control channel (`PARCEL on\|off`). |
+| `--parcel-max <bytes>` | Per-transaction cap on captured payload (default 256, max 30720). Bigger catches large parcels at more ring/CPU cost; the ring only pays for the bytes actually captured. Retunable live (`PARCEL max <n>`). |
 | `--include-replies` | Keep normal (successful) replies, which are otherwise dropped in the probe before the ring buffer. |
-| `--control [port]` | Control channel for the Track C app (default 3491): a line TCP server driving the runtime live. Commands: `STATUS`; `START`/`STOP` (capture toggle); `SINK console\|logcat\|both\|none`; `DLT on\|off`; `ERRORS on\|off` (error capture); `TRACK on\|off` (interface discovery, off by default); `LIST` (interfaces seen while discovering); `GET`/`SET a,b,c`/`CLEAR` (in-kernel filter). Enabling `--control` also auto-binds the DLT server (see `--dlt-serve`) so `DLT on` has an endpoint. |
+| `--control [port]` | Control channel for the Track C app (default 3491): a line TCP server driving the runtime live. Commands: `STATUS`; `START`/`STOP` (capture toggle); `SINK console\|logcat\|both\|none`; `DLT on\|off`; `ERRORS on\|off` (error capture); `PARCEL on\|off` / `PARCEL max <bytes>` (parcel payload capture + cap); `TRACK on\|off` (interface discovery, off by default); `LIST` (interfaces seen while discovering); `GET`/`SET a,b,c`/`CLEAR` (in-kernel filter). Enabling `--control` also auto-binds the DLT server (see `--dlt-serve`) so `DLT on` has an endpoint. |
 
 ```sh
 # Keep only PowerManager + ActivityManager traffic, stream to DLT Viewer, no console
 adb shell /data/local/tmp/bindfetto --sink none --dlt-serve \
   --iface android.os.IPowerManager,android.app.IActivityManager
+
+# Capture parcel payloads for one interface and decode the arguments offline
+python3 ../catalog/bindfetto_catalog.py --args -o catalog.json IPowerManager.aidl
+adb shell /data/local/tmp/bindfetto --iface android.os.IPowerManager --parcel on \
+  | ../decode/target/release/bindfetto-decode --catalog catalog.json
+# ... IPowerManager.acquireWakeLock(lock=<binder>, flags=1, tag="scr"), 96B
 ```
+
+### Decoding parcel payloads (M6)
+
+The device emits only raw parcel bytes (`--parcel`); method **arguments** are decoded
+offline, keeping the hot path cheap and the logs re-decodable. Build the catalog with
+`--args` (v2, carries per-method argument types), then pipe the capture through
+`bindfetto-decode` — it reads the `parcel=<hex>` token and renders `method(a=1, b="x")`,
+marking `…(truncated)` past the cap and `<Type>, …(unparsed)` for arguments with no fixed
+layout (binders, arrays, parcelables). See `catalog/README.md` and `decode/README.md`.
 
 See the repo-root `ROADMAP.md` for the milestone sequence.

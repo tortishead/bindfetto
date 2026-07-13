@@ -16,6 +16,12 @@ Pure Python 3 standard library — no dependencies.
 python3 bindfetto_catalog.py -o catalog.json /path/to/aosp/frameworks/base
 python3 bindfetto_catalog.py IActivityManager.aidl
 python3 bindfetto_catalog.py https://.../IPowerManager.aidl
+
+# --args: v2 catalog carrying per-method argument types, for decoding parcel payloads
+# captured with the runtime's `--parcel`. Entries become
+# {"name": "...", "args": [{"name": "...", "type": "..."}]} instead of a bare name;
+# the decoder accepts either form.
+python3 bindfetto_catalog.py --args -o catalog.json IPowerManager.aidl
 ```
 
 Then decode with any consumer, e.g.:
