@@ -42,7 +42,7 @@ use AIDL matching the device build.
 **Plugins** (`plugins/`) — `dlt/` (C++/Qt over the C ABI, recognizes lines by the
 `BINDFETTO` marker), `vscode/` (TypeScript over WASM).
 
-**Control app** (`app/`, Kotlin/Compose) — the runtime runs as a **root daemon** (an app
+**Control app** (`bindfetto-app/`, Kotlin/Compose) — the runtime runs as a **root daemon** (an app
 can't grant itself BPF); the app drives it over TCP (`127.0.0.1:3491`). Start/Stop toggles
 capture, it does not spawn the process. Protocol wrapper: `ControlClient.kt`. Tabs:
 Control, Filter (discovery only while the tab is open), Deploy (`su`, adb fallback).
@@ -66,7 +66,7 @@ cargo test                     # decode/  (host build; also produces the .a + C 
 cargo test -p bindfetto-common # runtime/ wire-contract layout invariants (host build)
 python3 -m unittest discover -s tests -v   # catalog/
 npm install && npm run build:wasm && npm run compile && npm run smoke   # plugins/vscode/
-./gradlew :app:assembleDebug   # app/ (needs JDK 17; build runtime first to bundle the binary)
+(cd bindfetto-app && ./gradlew :app:assembleDebug)   # needs JDK 17; build runtime first to bundle the binary
 ```
 
 Test coverage splits by what's host-runnable: `./run-tests.sh` covers the decode core,

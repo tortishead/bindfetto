@@ -59,7 +59,7 @@ and lets the same captured logs be re-decoded against any catalog version.
 | **Catalog builder** | `catalog/` | Python 3 | Turns AIDL source into the `interface → { code → method }` JSON catalog. |
 | **DLT Viewer plugin** | `plugins/dlt/` | C++/Qt | Rewrites codes to method names inline in [DLT Viewer](https://github.com/COVESA/dlt-viewer). |
 | **VS Code extension** | `plugins/vscode/` | TypeScript + WASM | Decodes a bindfetto log inside the editor. |
-| **Control app** | `app/` | Kotlin / Jetpack Compose | Android GUI that drives the runtime daemon live over TCP. |
+| **Control app** | `bindfetto-app/` | Kotlin / Jetpack Compose | Android GUI that drives the runtime daemon live over TCP. |
 
 ### How capture works
 
@@ -280,7 +280,7 @@ Deploy tab shows an adb fallback.
 **Linux / macOS**
 ```bash
 export JAVA_HOME="/path/to/jdk17"           # e.g. /Applications/Android Studio.app/Contents/jbr/Contents/Home on macOS
-cd app
+cd bindfetto-app
 ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -288,7 +288,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 **Windows (PowerShell)**
 ```powershell
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
-cd app
+cd bindfetto-app
 .\gradlew.bat :app:assembleDebug
 adb install -r app\build\outputs\apk\debug\app-debug.apk
 ```
@@ -303,7 +303,7 @@ the daemon at `127.0.0.1:3491`; from a host you can drive the same protocol via
 
 - `SPEC.md` — full design specification.
 - `ROADMAP.md` — milestone-by-milestone build status.
-- Per-component READMEs under `runtime/`, `decode/`, `catalog/`, `plugins/*`, `app/`.
+- Per-component READMEs under `runtime/`, `decode/`, `catalog/`, `plugins/*`, `bindfetto-app/`.
 
 ## License
 
