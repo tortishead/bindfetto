@@ -52,6 +52,27 @@ adb shell cat /sys/kernel/tracing/events/binder/binder_transaction/format
 > `OFF_FLAGS`) are set for the dev AVD kernel — confirm them against that `format`
 > output when moving to a different device/kernel.
 
+### Kernel must have kprobes (`CONFIG_KPROBES`)
+
+The probe attaches a **kprobe** on `binder_transaction()` to read the parcel — that's
+where the interface descriptor and the M6 payload come from. Without kprobe support the
+kprobe won't attach and **bindfetto exits at startup** (`attach kprobe binder_transaction`).
+Check before running:
+
+```sh
+# Preferred: the kernel config, if exposed (CONFIG_IKCONFIG_PROC).
+adb shell 'zcat /proc/config.gz 2>/dev/null | grep -E "CONFIG_KPROBES|CONFIG_KPROBE_EVENTS"'
+# Expect: CONFIG_KPROBES=y  and  CONFIG_KPROBE_EVENTS=y
+
+# Fallback when /proc/config.gz is absent: the tracefs kprobe interface must exist.
+adb shell 'ls /sys/kernel/tracing/kprobe_events && echo kprobes-ok'
+```
+
+If neither is present the kernel was built without kprobes; the tracepoint-only data
+(pids / code / size / errors) is still reachable in principle, but this build requires the
+kprobe and won't start — rebuild the kernel with `CONFIG_KPROBES=y` (+ `CONFIG_KPROBE_EVENTS=y`),
+or use a device/AVD whose kernel has them (the arm64 AVD images do).
+
 ## Build & run (Milestone 1)
 
 ```sh
