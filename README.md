@@ -75,6 +75,10 @@ and lets the same captured logs be re-decoded against any catalog version.
 4. **Method names are never resolved on device.** The `[code:N]` token is resolved
    offline against an AIDL catalog. Special interface-agnostic transactions
    (`PING`/`DUMP`/`INTERFACE`/`SYSPROPS`/`SHELL_CMD`) resolve without a catalog.
+5. **Parcel payloads, on demand.** With `--parcel` (under an interface filter) the probe
+   also captures the raw parcel bytes; the offline decoder unmarshals them into method
+   **arguments** — `acquireWakeLock(lock=<binder>, flags=1, tag="scr")` — against a v2
+   catalog. Off by default and capped, so the hot path stays cheap. See below.
 
 ### Output sinks
 
@@ -171,6 +175,9 @@ adb shell /data/local/tmp/bindfetto --sink logcat --jsonl /data/local/tmp/tx.jso
 
 # Run as a controllable daemon for the app (auto-binds the DLT server)
 adb shell /data/local/tmp/bindfetto --control 3491 --sink none
+
+# Capture parcel payloads (arguments) for one interface, up to 4 KiB each
+adb shell /data/local/tmp/bindfetto --iface android.os.IPowerManager --parcel on --parcel-max 4096
 ```
 
 | Flag | Effect |
@@ -180,6 +187,8 @@ adb shell /data/local/tmp/bindfetto --control 3491 --sink none
 | `--dlt-serve [port]` | Act as a DLT TCP server (default 3490). |
 | `--iface <name>` | In-kernel exact-match interface filter; repeatable / comma-separated. |
 | `--errors [on\|off]` | Capture `BR_FAILED_REPLY` / `BR_DEAD_REPLY` with a decoded errno. |
+| `--parcel [on\|off]` | Capture raw parcel payloads (needs `--iface`); arguments decoded offline. |
+| `--parcel-max <bytes>` | Cap on captured payload per transaction (default 256, max 30720). |
 | `--include-replies` | Keep normal replies (otherwise dropped before the ring buffer). |
 | `--control [port]` | Line-protocol TCP control channel (default 3491). |
 
@@ -196,6 +205,8 @@ cd catalog
 # a folder of AIDL (recursed), a single file, or an http(s) URL — mix freely
 python3 bindfetto_catalog.py -o catalog.json /path/to/aosp/frameworks/base
 python3 bindfetto_catalog.py https://android.googlesource.com/.../IPowerManager.aidl
+# add --args for a v2 catalog with argument types (needed to decode --parcel payloads)
+python3 bindfetto_catalog.py --args -o catalog.json /path/to/aosp/frameworks/base
 ```
 > On Windows use `py bindfetto_catalog.py ...` if `python3` isn't on PATH.
 > **Codes are aligned to the exact AIDL you feed it** — use the AIDL that matches the
@@ -211,6 +222,9 @@ cargo build --release        # also produces libbindfetto_decode.a + the C heade
 adb logcat -s bindfetto | ./target/release/bindfetto-decode --catalog catalog.json
 ./target/release/bindfetto-decode --catalog catalog.json capture.log
 ```
+> With a v2 catalog (`--args`), lines that carry a captured `parcel=<hex>` token
+> (runtime `--parcel`) render the method arguments — `acquireWakeLock(flags=1, tag="scr")` —
+> marking `…(truncated)` past the cap and `<Type>, …(unparsed)` for binders/arrays/parcelables.
 > On Windows the binary is `bindfetto-decode.exe`; pipe with PowerShell:
 > `adb logcat -s bindfetto | .\target\release\bindfetto-decode.exe --catalog catalog.json`.
 
