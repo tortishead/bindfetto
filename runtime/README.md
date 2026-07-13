@@ -73,6 +73,22 @@ If neither is present the kernel was built without kprobes; the tracepoint-only 
 kprobe and won't start — rebuild the kernel with `CONFIG_KPROBES=y` (+ `CONFIG_KPROBE_EVENTS=y`),
 or use a device/AVD whose kernel has them (the arm64 AVD images do).
 
+### Debugging pid→name resolution
+
+Names come from `/proc/<pid>/cmdline` (then `comm`) resolved in userspace, so a
+short-lived process can exit before it's read and show as `pid:<n>`. To see why a given
+pid stays unresolved, set `BINDFETTO_DEBUG=1` — the resolver traces each attempt to
+stderr, and for a failure reports whether `/proc/<pid>` still exists:
+
+```sh
+adb shell 'BINDFETTO_DEBUG=1 /data/local/tmp/bindfetto --sink none' 2>&1 | grep '\[names\]'
+# [names] pid 26824: UNRESOLVED (/proc/26824 exists: false)   -> exit race (process gone)
+# [names] pid 32414: cmdline read failed: <errno>             -> live but unreadable
+```
+
+`exists: false` is the unavoidable exit race. `exists: true` (or a read error on a live
+pid) points at a permissions / pid-namespace / procfs issue worth reporting.
+
 ## Build & run (Milestone 1)
 
 ```sh

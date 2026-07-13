@@ -753,6 +753,9 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut emitter = Emitter::new(state, boot_offset_ns, jsonl, dlt, failed_log);
 
+    if name_debug() {
+        eprintln!("bindfetto: BINDFETTO_DEBUG on — tracing pid→name resolution to stderr");
+    }
     println!("bindfetto: capturing binder transactions (Ctrl-C to stop)");
 
     loop {
@@ -1180,7 +1183,12 @@ impl NameCache {
             Some(name) => is_pid_fallback(name, pid),
         };
         if unresolved {
-            self.0.insert(pid, resolve_name(pid));
+            let name = resolve_name(pid);
+            if name_debug() {
+                let cached = self.0.get(&pid).map(String::as_str);
+                eprintln!("[names] pid {pid}: resolve (was {cached:?}) -> {name:?}");
+            }
+            self.0.insert(pid, name);
         }
     }
 
@@ -1192,20 +1200,49 @@ impl NameCache {
     }
 }
 
+/// Whether `BINDFETTO_DEBUG` is set (checked once). Enables stderr tracing of pid→name
+/// resolution so a stuck `pid:<n>` can be diagnosed without recompiling.
+fn name_debug() -> bool {
+    use std::sync::OnceLock;
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| std::env::var_os("BINDFETTO_DEBUG").is_some())
+}
+
 fn resolve_name(pid: u32) -> String {
+    let dbg = name_debug();
     // /proc/<pid>/cmdline: NUL-separated argv; the first field is the process name.
-    if let Ok(bytes) = fs::read(format!("/proc/{pid}/cmdline")) {
-        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        if end > 0 {
-            return String::from_utf8_lossy(&bytes[..end]).into_owned();
+    match fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(bytes) => {
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            if end > 0 {
+                return String::from_utf8_lossy(&bytes[..end]).into_owned();
+            }
+            if dbg {
+                eprintln!("[names] pid {pid}: cmdline read ok but empty ({} bytes)", bytes.len());
+            }
         }
+        Err(e) if dbg => eprintln!("[names] pid {pid}: cmdline read failed: {e}"),
+        Err(_) => {}
     }
     // Fallback: /proc/<pid>/comm (truncated to 15 chars by the kernel).
-    if let Ok(s) = fs::read_to_string(format!("/proc/{pid}/comm")) {
-        let t = s.trim_end();
-        if !t.is_empty() {
-            return t.to_owned();
+    match fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(s) => {
+            let t = s.trim_end();
+            if !t.is_empty() {
+                return t.to_owned();
+            }
+            if dbg {
+                eprintln!("[names] pid {pid}: comm read ok but empty");
+            }
         }
+        Err(e) if dbg => eprintln!("[names] pid {pid}: comm read failed: {e}"),
+        Err(_) => {}
+    }
+    if dbg {
+        // Is the pid actually alive right now? Distinguishes an exit race from a genuine
+        // read failure on a live process (permissions / namespace / procfs quirk).
+        let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
+        eprintln!("[names] pid {pid}: UNRESOLVED (/proc/{pid} exists: {alive})");
     }
     format!("pid:{pid}")
 }
