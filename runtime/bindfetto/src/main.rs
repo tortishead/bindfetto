@@ -622,7 +622,11 @@ async fn main() -> anyhow::Result<()> {
         let server = dlt::DltServer::bind(dlt_port)
             .await
             .with_context(|| format!("bind DLT server on port {dlt_port}"))?;
-        println!("bindfetto: DLT server on 0.0.0.0:{dlt_port} — connect DLT Viewer as a TCP ECU");
+        println!(
+            "bindfetto: DLT server on 0.0.0.0:{dlt_port} — from the host run \
+             `adb forward tcp:{dlt_port} tcp:{dlt_port}`, then add a TCP ECU to \
+             localhost:{dlt_port} in DLT Viewer and Connect"
+        );
         Some(DltState::new(server))
     } else {
         None
