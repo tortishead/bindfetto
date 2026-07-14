@@ -12,6 +12,12 @@ as human-readable transaction logs.
 > Viewer, or VS Code — resolves that code to the real method name against a precompiled
 > **AIDL catalog**.
 
+Example of capture on real hardware target in DLT-Viewer:
+```
+... BFTO BFTO BIND 0 log info verbose 1 BINDFETTO dded.projection (41933) -> pid:33480 (33480):
+android.content.pm.IPackageManager.getApplicationInfo(packageName="com.google.android.embedded.projection", flags=128, userId=0), 184B
+```
+
 The bundled Android **control app** drives the on-device daemon live — toggle capture,
 switch sinks, stream to DLT, and pick which interfaces to keep:
 
