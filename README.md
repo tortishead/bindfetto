@@ -37,24 +37,26 @@ and lets the same captured logs be re-decoded against any catalog version.
 
 ```
   ON DEVICE (root)                                OFFLINE (workstation / log viewer)
-  +------------------------------------------+    +---------------------------------------+
-  |  eBPF probe                              |    |  AIDL catalog                         |
-  |    (binder_transaction / binder_return)  |    |    interface -> code -> method        |
-  |        |                                 |    |        ^                              |
-  |        v                                 |    |        | built from .aidl by          |
-  |  ring buffer                             |    |        | catalog/ (Python)            |
-  |        |                                 |    |                                       |
-  |        v  resolve pid->name, raw code    |    |  decode core (Rust)                   |
-  |  consumer                                |    |    resolves raw code -> method name   |
-  |        |                                 |    |    CLI . DLT plugin . VS Code ext     |
-  |        v                                 |    +---------------------------------------+
-  |  sinks: console | logcat | JSONL | DLT   |                    ^
-  +------------------------------------------+                    |
-        ^                    |                                    |
-        |                    +-- logs (raw code) ----------------+
+  +-------------------------------------------+    +---------------------------------------+
+  |  eBPF probe                               |    |  AIDL catalog                         |
+  |    (binder_transaction¹ / binder_return²) |    |    interface -> code -> method        |
+  |        |                                  |    |        ^                              |
+  |        v                                  |    |        | built from .aidl by          |
+  |  ring buffer                              |    |        | catalog/ (Python)            |
+  |        |                                  |    |                                       |
+  |        v  resolve pid->name, raw code     |    |  decode core (Rust)                   |
+  |  consumer                                 |    |    resolves raw code -> method name   |
+  |        |                                  |    |    CLI . DLT plugin . VS Code ext     |
+  |        v                                  |    +---------------------------------------+
+  |  sinks: console | logcat | JSONL | DLT    |                    ^
+  +-------------------------------------------+                    |
+        ^                    |                                     |
+        |                    +-- logs (raw code) ------------------+
         | control channel (TCP 3491)
   control app (Android, Kotlin/Compose)
 ```
+<sup>1</sup> [binder.c / binder_transaction tracepoint](https://cs.android.com/android/kernel/superproject/+/common-android-mainline:common/drivers/android/binder.c?q=trace_binder_transaction%5C%28%20f:binder.c)<br>
+<sup>2</sup> [binder.c / binder_return tracepoint](https://cs.android.com/search?q=trace_binder_return+f:binder.c&sq=)
 
 ### Components
 
