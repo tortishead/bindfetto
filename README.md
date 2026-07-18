@@ -355,7 +355,7 @@ adb shell cat /sys/kernel/tracing/events/binder/binder_transaction/format
 | `--iface <name>` | In-kernel exact-match interface filter; repeatable / comma-separated. |
 | `--errors [on\|off]` | Capture `BR_FAILED_REPLY` / `BR_DEAD_REPLY` with a decoded errno. |
 | `--parcel [on\|off]` | Capture raw parcel payloads (needs `--iface`); arguments decoded offline. |
-| `--parcel-max <bytes>` | Cap on captured payload per transaction (default 256, max 30720). |
+| `--parcel-max <bytes>` | Cap on captured payload per transaction (default 256). Hard cap **30 KiB** — the wire record is a fixed buffer; larger parcels decode `…(truncated)`. |
 | `--include-replies` | Keep normal replies (otherwise dropped before the ring buffer). |
 | `--control [port]` | Line-protocol TCP control channel (default 3491). |
 
@@ -397,7 +397,7 @@ One command per line; replies are `OK` / `ERR …`, or a body terminated by `END
 | `SINK <console\|logcat\|both\|none>` | Switch the line sink. | `OK` / `ERR` |
 | `DLT <on\|off>` | Toggle the DLT TCP server. | `OK` / `ERR` |
 | `ERRORS <on\|off>` | Toggle error capture (flips the BPF flag map). | `OK` / `ERR` |
-| `PARCEL <on\|off>` / `PARCEL max <bytes>` | Toggle parcel capture / retune the cap. | `OK` / `ERR` |
+| `PARCEL <on\|off>` / `PARCEL max <bytes>` | Toggle parcel capture / retune the cap (clamped to 30 KiB). | `OK` / `ERR` |
 | `TRACK <on\|off>` | Toggle interface discovery. | `OK` / `ERR` |
 | `LIST` | List observed interfaces (discovery). | list + `END` |
 | `GET` | List the active filter. | list + `END` |
