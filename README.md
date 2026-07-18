@@ -8,11 +8,9 @@ Bindfetto observes Android **Binder** IPC traffic at the kernel level and surfac
 as human-readable transaction logs. No Perfetto or tracing stack — just a standalone
 binary. Ideal for **automotive development and in-car testing.**
 
-> [!TIP]
-> **The highlight: offline method-name decoding.** The kernel hot path stays cheap by
-> emitting only the *raw* transaction code. A separate offline pass — in the CLI, DLT
-> Viewer, or VS Code — resolves that code to the real method name against a precompiled
-> **AIDL catalog**.
+- **Cheap capture** — the kernel emits only the raw transaction code.
+- **Offline decode** — CLI / DLT Viewer / VS Code resolve method names via an AIDL catalog.
+- **Re-decodable** — the same logs decode against any catalog version.
 
 The bundled Android **control app** drives the on-device daemon live — toggle capture,
 switch sinks, stream to DLT, and pick which interfaces to keep.
@@ -41,7 +39,9 @@ macOS + Linux (bash). It detects your OS, downloads from the [latest release](ht
 - **dlt** — auto-searches DLT Viewer's plugins directory (override with `--dlt-plugin-dir <dir>`), copies the plugin in.
 - **vscode** — `code --install-extension`.
 
-Per-artifact manual steps are in [Deploy](#deploy).
+Manual alternative: runtime + app steps are in [Deploy](#deploy); DLT plugin and VS Code
+extension setup under [Build](#offline-decode-toolchain) (drop the release asset in place
+of the built artifact).
 
 ---
 
@@ -66,13 +66,15 @@ emits raw codes (see [Catalog builder](#catalog-builder-python-3-stdlib-only)).
    <img src='./docs/screenshot-control.png' width='450' alt='bindfetto control app — Control tab'>
 
 4. **Decode.** Point a viewer at a catalog and read method names:
-   - **DLT Viewer** — enable **Bindfetto DLT decoder**, set its config to generated JSON catalog file.
+   - **DLT Viewer** — `adb forward tcp:3490 tcp:3490`, add a TCP ECU at `localhost:3490`,
+     enable **Bindfetto DLT decoder**, set its config to the generated `catalog.json`.
 
      <img src="./docs/screenshot-dlt-viewer.png"  width="450" alt="Bindfetto method names decoded in DLT Viewer" />
    - **VS Code** — set `bindfetto.catalogPath`, open a log, run **Bindfetto: Decode Active Editor**.
    - **CLI** — `adb logcat -s bindfetto | bindfetto-decode --catalog catalog.json`.
 
 > <sup>1</sup> The control app can only **launch** the runtime itself when it's a **privileged app** — a rooted device (`su`) or a platform-signed build. A normal debug install can't grant itself root/BPF; start the daemon via adb and let the app connect + control it.
+
 ---
 
 ## Architecture
@@ -148,8 +150,8 @@ and lets the same captured logs be re-decoded against any catalog version.
 
 ## Requirements
 
-- **Device:** an Android target or AVD with a BTF-enabled kernel (```CONFIG_KPROBES=y```), **root**, and a
-  permissive-capable SELinux domain.<br>
+- **Device:** an Android target or AVD with kprobes enabled in the kernel
+  (```CONFIG_KPROBES=y```), **root**, and a permissive-capable SELinux domain.<br>
   Verify with: ```adb shell zcat /proc/config.gz | grep CONFIG_KPROBES```
 
 - **Runtime build:** Rust **nightly** (pinned via `rust-toolchain.toml`) + `rust-src`,
@@ -286,7 +288,7 @@ Then load the built plugin in DLT Viewer and set its config to your `catalog.jso
 | OS | Built artifact |
 |---|---|
 | Linux | `libbindfettodecoderplugin.so` |
-| macOS | `libbindfettodecoderplugin.dylib` (Rust runtime pulls in CoreFoundation/Security, handled by CMake) |
+| macOS | `libbindfettodecoderplugin.so` — CMake `MODULE` libraries keep the `.so` suffix on macOS (it's a Mach-O bundle; Rust runtime pulls in CoreFoundation/Security, handled by CMake) |
 | Windows | `bindfettodecoderplugin.dll` |
 
 DLT Viewer has no fixed system plugins folder — it scans a **plugin search path you
