@@ -52,10 +52,12 @@ done
 V_RUNTIME="$(sed -n 's/^version = "\(.*\)"/\1/p' runtime/Cargo.toml | head -1)"
 V_DECODE="$(sed -n 's/^version = "\(.*\)"/\1/p' decode/Cargo.toml | head -1)"
 V_VSCODE="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' plugins/vscode/package.json | head -1)"
+V_DLT="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' plugins/dlt/bindfettodecoderplugin.json | head -1)"
 V_APP="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' bindfetto-app/app/build.gradle.kts | head -1)"
 mismatch=""
 for pair in "runtime/Cargo.toml=$V_RUNTIME" "decode/Cargo.toml=$V_DECODE" \
-            "plugins/vscode/package.json=$V_VSCODE" "app/build.gradle.kts=$V_APP"; do
+            "plugins/vscode/package.json=$V_VSCODE" "dlt/bindfettodecoderplugin.json=$V_DLT" \
+            "app/build.gradle.kts=$V_APP"; do
   [ "${pair#*=}" = "$VERSION" ] || mismatch="${mismatch}"$'\n'"  ${pair%%=*}: ${pair#*=} (want ${VERSION})"
 done
 if [ -n "$mismatch" ]; then

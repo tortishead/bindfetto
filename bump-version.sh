@@ -7,6 +7,7 @@
 #   runtime/Cargo.toml            [workspace.package] version   (binary + all member crates)
 #   decode/Cargo.toml             [package] version
 #   plugins/vscode/package.json   "version"
+#   plugins/dlt/bindfettodecoderplugin.json   "version"   (compiled into the DLT .so)
 #   bindfetto-app/app/build.gradle.kts   versionName + versionCode (int, auto-incremented)
 #
 # Usage:
@@ -48,14 +49,19 @@ set_toml_version() { # <file> <section-header> <new>
 set_toml_version runtime/Cargo.toml '[workspace.package]' "$VERSION"
 set_toml_version decode/Cargo.toml   '[package]'          "$VERSION"
 
-# package.json: first top-level "version" key only.
-awk -v ver="$VERSION" '
-  !done && /"version"[[:space:]]*:/ {
-    sub(/"version"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"version\": \"" ver "\""); done=1
-  }
-  { print }
-' plugins/vscode/package.json > plugins/vscode/package.json.tmp \
-  && mv plugins/vscode/package.json.tmp plugins/vscode/package.json
+# JSON: first "version" key only. Preserves the existing indentation of that line.
+set_json_version() { # <file> <new>
+  awk -v ver="$2" '
+    !done && /"version"[[:space:]]*:/ {
+      sub(/"version"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"version\": \"" ver "\""); done=1
+    }
+    { print }
+    END { if (!done) exit 3 }
+  ' "$1" > "$1.tmp" || { rm -f "$1.tmp"; die "no \"version\" key in $1"; }
+  mv "$1.tmp" "$1"
+}
+set_json_version plugins/vscode/package.json "$VERSION"
+set_json_version plugins/dlt/bindfettodecoderplugin.json "$VERSION"
 
 # gradle: versionName string + versionCode int.
 sed -i.bak -E \
@@ -63,8 +69,9 @@ sed -i.bak -E \
   -e "s/versionCode = [0-9]+/versionCode = $NEW_CODE/" \
   "$GRADLE" && rm -f "$GRADLE.bak"
 
-ok "runtime/Cargo.toml           -> $VERSION"
-ok "decode/Cargo.toml            -> $VERSION"
-ok "plugins/vscode/package.json  -> $VERSION"
+ok "runtime/Cargo.toml                     -> $VERSION"
+ok "decode/Cargo.toml                      -> $VERSION"
+ok "plugins/vscode/package.json            -> $VERSION"
+ok "plugins/dlt/bindfettodecoderplugin.json -> $VERSION"
 ok "$GRADLE  -> versionName $VERSION, versionCode $NEW_CODE"
 printf '%s\n' "${B}Bumped to ${VERSION} (code ${NEW_CODE}). Review, commit, then build + ./release.sh ${VERSION} --upload${RST}"
