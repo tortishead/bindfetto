@@ -1,9 +1,14 @@
 package com.bindfetto.control
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.isSpecified
+import androidx.compose.ui.unit.sp
 
 // Palette pulled from the app icon: cyan / blue / purple nodes on a dark navy field.
 private val Cyan = Color(0xFF22D3EE)
@@ -36,7 +41,40 @@ private val BindfettoColors = darkColorScheme(
     outlineVariant = Color(0xFF262B47),
 )
 
+// Scale every default Material 3 text style up for readability on-device.
+private const val FontScale = 1.20f
+
+private fun TextUnit.scaled(): TextUnit =
+    if (isSpecified) (value * FontScale).sp else this
+
+private fun TextStyle.scaled(): TextStyle =
+    copy(fontSize = fontSize.scaled(), lineHeight = lineHeight.scaled())
+
+private val BindfettoTypography = Typography().run {
+    copy(
+        displayLarge = displayLarge.scaled(),
+        displayMedium = displayMedium.scaled(),
+        displaySmall = displaySmall.scaled(),
+        headlineLarge = headlineLarge.scaled(),
+        headlineMedium = headlineMedium.scaled(),
+        headlineSmall = headlineSmall.scaled(),
+        titleLarge = titleLarge.scaled(),
+        titleMedium = titleMedium.scaled(),
+        titleSmall = titleSmall.scaled(),
+        bodyLarge = bodyLarge.scaled(),
+        bodyMedium = bodyMedium.scaled(),
+        bodySmall = bodySmall.scaled(),
+        labelLarge = labelLarge.scaled(),
+        labelMedium = labelMedium.scaled(),
+        labelSmall = labelSmall.scaled(),
+    )
+}
+
 @Composable
 fun BindfettoTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = BindfettoColors, content = content)
+    MaterialTheme(
+        colorScheme = BindfettoColors,
+        typography = BindfettoTypography,
+        content = content,
+    )
 }
