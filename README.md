@@ -456,12 +456,6 @@ with `BINDFETTO_KEYSTORE` / `BINDFETTO_KEYSTORE_PASS` / `BINDFETTO_KEY_ALIAS` /
 
 ---
 
-## Documentation
-
-- `docs/SPEC.md` — full design specification.
-- `docs/ROADMAP.md` — milestone-by-milestone build status.
-- Per-component READMEs under `runtime/`, `decode/`, `catalog/`, `plugins/*`, `bindfetto-app/`.
-
 ## License
 
 Apache-2.0. See [LICENSE](./LICENSE).
