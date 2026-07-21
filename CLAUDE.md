@@ -79,9 +79,28 @@ Runtime CLI flags: `--sink console|logcat|both|none`, `--jsonl <path>`,
 `--dlt-serve [port]` (3490), `--iface <name>` (repeatable, exact match), `--errors [on|off]`,
 `--parcel [on|off]` (M6 parcel capture; only honored with an active `--iface` filter),
 `--parcel-max <bytes>` (per-transaction payload cap, default 256, clamped to a 30 KiB ceiling),
-`--include-replies`, `--control [port]` (3491, auto-binds DLT). On a new device, confirm the
-tracepoint offsets in `bindfetto-ebpf/src/main.rs` against
+`--include-replies`, `--control [port]` (3491, auto-binds DLT), `--version`/`-V` (print
+version + exit, no root). On a new device, confirm the tracepoint offsets in
+`bindfetto-ebpf/src/main.rs` against
 `/sys/kernel/tracing/events/binder/binder_transaction/format`.
+
+## Release & versioning
+
+Installers/scripts at the repo root: `install.sh` (user-facing — pulls the latest GitHub
+release assets, OS-aware), `bump-version.sh` + `release.sh` (maintainer).
+
+- **Versioning is lockstep** — one product version across **six** manifests:
+  `runtime/Cargo.toml` (`[workspace.package]`), `decode/Cargo.toml`,
+  `plugins/vscode/package.json`, `plugins/dlt/bindfettodecoderplugin.json` (compiled into
+  the DLT `.so` via `Q_PLUGIN_METADATA`), and the app's `versionName` + `versionCode`.
+  Change them only via `./bump-version.sh <ver>`; anything else drifts.
+- **Releasing** — `./release.sh [ver] [--upload]` stages the built artifacts under
+  canonical versioned asset names and publishes to the GitHub release. Its preflight
+  refuses `--upload` unless all six manifests agree. `install.sh` resolves each asset by a
+  stable prefix+suffix pattern (version-agnostic).
+- **The DLT `.so` is per-host** — release.sh stages only the current OS's `.so` (never
+  cross-labels); run it once on macOS and once on Linux to publish both. APK is
+  debug-signed unless `BINDFETTO_KEYSTORE*` env vars point at a real keystore.
 
 ## Conventions
 
