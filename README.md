@@ -50,9 +50,14 @@ of the built artifact).
 its build output is present, so it can run per-host (macOS `.so` on a Mac, Linux `.so` on
 Linux) and re-upload with `--clobber`.
 
+All components share one version (lockstep). Bump every manifest at once, then build and
+release — `release.sh` refuses to `--upload` a mismatched set:
+
 ```sh
+./bump-version.sh 0.2.0      # sets runtime + decode + vscode + app (versionCode auto +1)
+# review, commit, push, then build the components (see below)
 ./release.sh                 # version from runtime/Cargo.toml, stage to dist/ (dry run)
-./release.sh --upload        # create/refresh the release and upload (needs gh, authed)
+./release.sh --upload        # preflight (all versions must agree), then create/upload
 ./release.sh 0.2.0 --upload  # override the version explicitly
 ```
 

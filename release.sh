@@ -47,6 +47,25 @@ done
 [ -n "$TAG" ] || TAG="$VERSION"
 [ -n "$REPO" ] || REPO="$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\.git$##')"
 
+# ---- preflight: every manifest must agree on VERSION (bump-version.sh keeps them in
+# lockstep). Hard-fail before an --upload; warn on a dry run so you can still inspect dist/.
+V_RUNTIME="$(sed -n 's/^version = "\(.*\)"/\1/p' runtime/Cargo.toml | head -1)"
+V_DECODE="$(sed -n 's/^version = "\(.*\)"/\1/p' decode/Cargo.toml | head -1)"
+V_VSCODE="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' plugins/vscode/package.json | head -1)"
+V_APP="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' bindfetto-app/app/build.gradle.kts | head -1)"
+mismatch=""
+for pair in "runtime/Cargo.toml=$V_RUNTIME" "decode/Cargo.toml=$V_DECODE" \
+            "plugins/vscode/package.json=$V_VSCODE" "app/build.gradle.kts=$V_APP"; do
+  [ "${pair#*=}" = "$VERSION" ] || mismatch="${mismatch}"$'\n'"  ${pair%%=*}: ${pair#*=} (want ${VERSION})"
+done
+if [ -n "$mismatch" ]; then
+  if [ "$UPLOAD" -eq 1 ]; then
+    die "version mismatch — run ./bump-version.sh ${VERSION} first:${mismatch}"
+  else
+    warn "version mismatch (dry run continues):${mismatch}"
+  fi
+fi
+
 DIST="$ROOT/dist"
 rm -rf "$DIST"; mkdir -p "$DIST"
 info "Packaging bindfetto ${VERSION} (tag ${TAG}) -> dist/"
