@@ -108,11 +108,14 @@ stage "$APK_SIGNED" "bindfetto-app-${VERSION}.apk"
 stage "plugins/vscode/bindfetto-decode-${VERSION}.vsix" \
       "bindfetto-decode-${VERSION}.vsix"
 
-# ---- DLT Viewer plugin (per-host build dirs) ----
-stage "plugins/dlt/build-mac/libbindfettodecoderplugin.so" \
-      "libbindfettodecoderplugin-${VERSION}-macos-arm64.so"
-stage "plugins/dlt/build/libbindfettodecoderplugin.so" \
-      "libbindfettodecoderplugin-${VERSION}-linux.so"
+# ---- DLT Viewer plugin (staged for the host OS only: a .so built here is a
+# native binary for this platform, so never cross-label it for another OS) ----
+case "$(uname -s)" in
+  Darwin) stage "plugins/dlt/build-mac/libbindfettodecoderplugin.so" \
+                "libbindfettodecoderplugin-${VERSION}-macos-arm64.so" ;;
+  Linux)  stage "plugins/dlt/build/libbindfettodecoderplugin.so" \
+                "libbindfettodecoderplugin-${VERSION}-linux.so" ;;
+esac
 
 [ "$staged" -gt 0 ] || die "nothing staged — build the components first."
 info "Staged ${staged} asset(s) in dist/"
