@@ -149,4 +149,4 @@ offline, keeping the hot path cheap and the logs re-decodable. Build the catalog
 marking `…(truncated)` past the cap and `<Type>, …(unparsed)` for arguments with no fixed
 layout (binders, arrays, parcelables). See `catalog/README.md` and `decode/README.md`.
 
-See the repo-root `ROADMAP.md` for the milestone sequence.
+See `docs/ROADMAP.md` for the milestone sequence.

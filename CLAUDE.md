@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 Bindfetto observes Android **Binder** IPC at the kernel level and emits human-readable
-transaction logs. Design is in `SPEC.md`; build order + current status in `ROADMAP.md`
+transaction logs. Design is in `docs/SPEC.md`; build order + current status in `docs/ROADMAP.md`
 (read it first when resuming). Per-component build detail lives in each dir's `README.md`.
 
 By design the system splits into a **fast on-device capture path** and a **rich offline
