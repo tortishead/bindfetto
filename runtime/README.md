@@ -126,6 +126,7 @@ offline against the AIDL catalog — a later milestone.
 | `--parcel-max <bytes>` | Per-transaction cap on captured payload (default 256, max 30720). Bigger catches large parcels at more ring/CPU cost; the ring only pays for the bytes actually captured. Retunable live (`PARCEL max <n>`). |
 | `--include-replies` | Keep normal (successful) replies, which are otherwise dropped in the probe before the ring buffer. |
 | `--control [port]` | Control channel for the Track C app (default 3491): a line TCP server driving the runtime live. Commands: `STATUS`; `START`/`STOP` (capture toggle); `SINK console\|logcat\|both\|none`; `DLT on\|off`; `ERRORS on\|off` (error capture); `PARCEL on\|off` / `PARCEL max <bytes>` (parcel payload capture + cap); `TRACK on\|off` (interface discovery, off by default); `LIST` (interfaces seen while discovering); `GET`/`SET a,b,c`/`CLEAR` (in-kernel filter). Enabling `--control` also auto-binds the DLT server (see `--dlt-serve`) so `DLT on` has an endpoint. |
+| `--version`, `-V` | Print the build version and exit (no root / BPF needed). |
 
 ```sh
 # Keep only PowerManager + ActivityManager traffic, stream to DLT Viewer, no console
