@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "bindfetto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "aya",
@@ -193,14 +193,14 @@ dependencies = [
 
 [[package]]
 name = "bindfetto-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aya",
 ]
 
 [[package]]
 name = "bindfetto-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bindfetto-common",
 ]
